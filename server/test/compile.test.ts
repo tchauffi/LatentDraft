@@ -2,10 +2,12 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { access, rm } from "node:fs/promises";
 import path from "node:path";
+import { writeFile } from "node:fs/promises";
 import {
   compileTex,
   writeSessionFiles,
   sessionDir,
+  listSessionFiles,
   extractTexLogErrors,
   errorLineNumbers,
   sourceAtLines,
@@ -122,6 +124,43 @@ test("extractTexLogErrors caps runaway output", () => {
   const out = extractTexLogErrors(block.repeat(500), 2000);
   assert.ok(out.length <= 2050, `capped output, got ${out.length}`);
   assert.match(out, /more errors omitted/);
+});
+
+test("a figure written by run_python resolves in the SAME session's compile", async () => {
+  const { runPython } = await import("../src/python.js");
+  const id = session("figure");
+  // 1x1 PNG via stdlib only — the point is the shared directory, not matplotlib.
+  const py = await runPython(
+    id,
+    'import base64\nopen("figure.png","wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))',
+  );
+  assert.equal(py.ok, true, py.output);
+  assert.deepEqual(py.createdFiles, ["figure.png"]);
+  const result = await compileTex(
+    id,
+    "\\documentclass{article}\\usepackage{graphicx}\\begin{document}\\includegraphics{figure.png}\\end{document}",
+  );
+  assert.equal(result.ok, true, result.log);
+  assert.deepEqual(await listSessionFiles(id), ["figure.png"]);
+});
+
+test("listSessionFiles reports project files but not build artifacts", async () => {
+  const id = session("list");
+  await writeSessionFiles(id, {
+    "refs.bib": "@article{x, title={y}}",
+    "sections/intro.tex": "\\section{Intro}",
+  });
+  // Simulate run_python output and compile artifacts.
+  const dir = sessionDir(id);
+  await writeFile(path.join(dir, "sine_wave.png"), "not-a-real-png");
+  await writeFile(path.join(dir, "main.tex"), "\\documentclass{article}");
+  await writeFile(path.join(dir, "main.log"), "log");
+  await writeFile(path.join(dir, "preview-1.png"), "png");
+  assert.deepEqual(await listSessionFiles(id), ["refs.bib", "sections/intro.tex", "sine_wave.png"]);
+});
+
+test("listSessionFiles returns empty for a session that never compiled", async () => {
+  assert.deepEqual(await listSessionFiles(`${RUN}-never-existed`), []);
 });
 
 test("errorLineNumbers reads main.tex line numbers from console and .log details", () => {

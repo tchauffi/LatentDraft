@@ -6,6 +6,14 @@ interface Props {
   words: number;
   cursor: { line: number; col: number };
   log: string;
+  /** Active editor buffer, for the file-type indicator. */
+  fileName: string;
+}
+
+function fileType(name: string): string {
+  if (name.endsWith(".tex")) return "LaTeX";
+  if (name.endsWith(".bib")) return "BibTeX";
+  return "Plain text";
 }
 
 /** First meaningful error line from a Tectonic log, for the status bar. */
@@ -18,7 +26,7 @@ function firstError(log: string): string {
   return line.replace(/^!\s*/, "").slice(0, 80);
 }
 
-export default function StatusBar({ status, pages, words, cursor, log }: Props) {
+export default function StatusBar({ status, pages, words, cursor, log, fileName }: Props) {
   return (
     <div className="statusbar">
       {status === "ready" && (
@@ -57,7 +65,7 @@ export default function StatusBar({ status, pages, words, cursor, log }: Props) 
 
       <div className="toolbar-spacer" />
 
-      <span className="mono">LaTeX</span>
+      <span className="mono">{fileType(fileName)}</span>
       <span className="stat-sep">·</span>
       <span className="mono">UTF-8</span>
       <span className="stat-sep">·</span>

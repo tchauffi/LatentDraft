@@ -33,6 +33,9 @@ interface UIMessage {
 }
 
 interface Props {
+  /** The editor's compile session — shared with the agent so files it
+   * generates (figures) resolve when the preview recompiles. */
+  sessionId?: string;
   getDocument: () => string;
   /** Auxiliary project files (refs.bib, sections/…) for the agent's compile sandbox. */
   getFiles?: () => Record<string, string>;
@@ -45,6 +48,10 @@ interface Props {
   onPendingEditsChange?: (edits: ProposedEdit[]) => void;
   /** Receives a resolver so other panes (inline suggestions) can accept/reject an edit by id. */
   resolverRef?: React.MutableRefObject<((editId: string, action: "accept" | "reject") => void) | null>;
+  /** Called when an agent turn finishes (files may have been generated server-side). */
+  onTurnEnd?: () => void;
+  /** Server-side generated files — part of the agent's context, shown in the composer chips. */
+  generatedFiles?: string[];
 }
 
 let idSeq = 0;
@@ -59,6 +66,7 @@ function Sparkle({ size = 12, fill = "#fff" }: { size?: number; fill?: string })
 }
 
 export default function ChatPane({
+  sessionId,
   getDocument,
   getFiles,
   getLastCompile,
@@ -67,6 +75,8 @@ export default function ChatPane({
   collapsed,
   onPendingEditsChange,
   resolverRef,
+  onTurnEnd,
+  generatedFiles,
 }: Props) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [provider, setProvider] = useState<string>("");
@@ -145,6 +155,7 @@ export default function ChatPane({
       {
         provider,
         model,
+        sessionId,
         documentText: getDocument(),
         files: getFiles?.(),
         lastCompile: getLastCompile?.() ?? undefined,
@@ -210,6 +221,9 @@ export default function ChatPane({
       setStreaming(false);
     });
     abortRef.current = null;
+    // The agent may have generated files (figures) into the shared compile
+    // session — let the app refresh its file tree.
+    onTurnEnd?.();
   }
 
   function stop() {
@@ -361,8 +375,30 @@ export default function ChatPane({
 
       <div className="composer">
         <div className="composer-box">
-          <div className="composer-chips">
-            <span className="chip">@main.tex</span>
+          <div
+            className="composer-chips"
+            title="Files the agent sees: it edits main.tex; the rest resolve in its compiles"
+          >
+            {(() => {
+              const ctx = [
+                "main.tex",
+                ...Object.keys(getFiles?.() ?? {}),
+                ...(generatedFiles ?? []),
+              ];
+              const shown = ctx.slice(0, 3);
+              return (
+                <>
+                  {shown.map((f) => (
+                    <span key={f} className="chip">
+                      @{f}
+                    </span>
+                  ))}
+                  {ctx.length > shown.length && (
+                    <span className="chip chip-more">+{ctx.length - shown.length} more</span>
+                  )}
+                </>
+              );
+            })()}
           </div>
           <textarea
             value={input}

@@ -5,7 +5,7 @@ import PreviewPane, { type PreviewStatus } from "./panes/PreviewPane";
 import ChatPane from "./panes/ChatPane";
 import TopToolbar from "./components/TopToolbar";
 import StatusBar from "./components/StatusBar";
-import { compile, type ProposedEdit } from "./lib/api";
+import { compile, fetchSessionFiles, sessionFileUrl, type ProposedEdit } from "./lib/api";
 import { applyEdit as applyEditToDoc, type ApplyResult } from "./lib/diff";
 
 const MAIN = "main.tex";
@@ -70,6 +70,9 @@ function countWords(tex: string): number {
 export default function App() {
   const [files, setFiles] = useState<Record<string, string>>(INITIAL_FILES);
   const [active, setActive] = useState<string>(MAIN);
+  // Tabs are OPEN buffers, not a mirror of the project: the tree opens them,
+  // × closes them. main.tex is pinned open (it's the compiled document).
+  const [openTabs, setOpenTabs] = useState<string[]>([MAIN]);
   const [pdf, setPdf] = useState<ArrayBuffer | null>(null);
   const [status, setStatus] = useState<PreviewStatus>("idle");
   const [log, setLog] = useState("");
@@ -78,6 +81,8 @@ export default function App() {
   const [cursor, setCursor] = useState({ line: 1, col: 1 });
   // Agent edits awaiting a decision, mirrored inline in the editor.
   const [pendingEdits, setPendingEdits] = useState<ProposedEdit[]>([]);
+  // Server-side files in the compile session (aux + agent-generated figures).
+  const [sessionFiles, setSessionFiles] = useState<string[]>([]);
   const editResolverRef = useRef<((editId: string, action: "accept" | "reject") => void) | null>(
     null,
   );
@@ -107,11 +112,16 @@ export default function App() {
     return rest;
   }, []);
 
+  const refreshSessionFiles = useCallback(async () => {
+    setSessionFiles(await fetchSessionFiles(sessionId));
+  }, [sessionId]);
+
   const runCompile = useCallback(
     async (tex: string) => {
       const seq = ++compileSeq.current;
       setStatus("compiling");
       const result = await compile(sessionId, tex, auxFiles());
+      void refreshSessionFiles();
       if (seq !== compileSeq.current) return; // superseded by a newer compile
       if (result.ok) {
         lastCompileRef.current = { ok: true, log: "" };
@@ -124,8 +134,15 @@ export default function App() {
         setLog(result.log);
       }
     },
-    [sessionId],
+    [sessionId, refreshSessionFiles],
   );
+
+  // Files that exist only server-side (e.g. figures the agent generated).
+  const generatedFiles = useMemo(
+    () => sessionFiles.filter((f) => !(f in files)),
+    [sessionFiles, files],
+  );
+  const fileUrl = useCallback((name: string) => sessionFileUrl(sessionId, name), [sessionId]);
 
   // Debounced compile whenever any file changes (aux files feed \input/\bibliography).
   useEffect(() => {
@@ -147,6 +164,17 @@ export default function App() {
 
   const getDocument = useCallback(() => mainRef.current, []);
   const getLastCompile = useCallback(() => lastCompileRef.current, []);
+
+  const openFile = useCallback((f: string) => {
+    setOpenTabs((tabs) => (tabs.includes(f) ? tabs : [...tabs, f]));
+    setActive(f);
+  }, []);
+
+  const closeTab = useCallback((f: string) => {
+    if (f === MAIN) return; // pinned
+    setOpenTabs((tabs) => tabs.filter((t) => t !== f));
+    setActive((a) => (a === f ? MAIN : a));
+  }, []);
 
   const applyEdit = useCallback((edit: ProposedEdit): ApplyResult => {
     const result = applyEditToDoc(mainRef.current, edit);
@@ -200,9 +228,13 @@ export default function App() {
                 value={activeText}
                 onChange={setActiveText}
                 onCursor={setCursor}
-                files={FILE_ORDER}
+                files={openTabs}
+                projectFiles={FILE_ORDER}
                 active={active}
-                onSelect={setActive}
+                onSelect={openFile}
+                onCloseTab={closeTab}
+                generatedFiles={generatedFiles}
+                fileUrl={fileUrl}
                 suggestions={active === MAIN ? pendingEdits : undefined}
                 onAcceptSuggestion={acceptSuggestion}
                 onRejectSuggestion={rejectSuggestion}
@@ -217,6 +249,7 @@ export default function App() {
 
         {/* Kept mounted so collapsing the agent never loses the conversation. */}
         <ChatPane
+          sessionId={sessionId}
           getDocument={getDocument}
           getFiles={auxFiles}
           getLastCompile={getLastCompile}
@@ -225,6 +258,8 @@ export default function App() {
           collapsed={!agentOpen}
           onPendingEditsChange={setPendingEdits}
           resolverRef={editResolverRef}
+          onTurnEnd={refreshSessionFiles}
+          generatedFiles={generatedFiles}
         />
 
         {!agentOpen && (
@@ -239,7 +274,7 @@ export default function App() {
         )}
       </div>
 
-      <StatusBar status={status} pages={pages} words={words} cursor={cursor} log={log} />
+      <StatusBar status={status} pages={pages} words={words} cursor={cursor} log={log} fileName={active} />
     </div>
   );
 }

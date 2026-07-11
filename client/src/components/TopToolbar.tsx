@@ -40,7 +40,13 @@ export default function TopToolbar({
         <span
           className="crumb-dot"
           style={{ background: savedColor }}
-          title={status === "error" ? "compile error" : "saved"}
+          title={
+            status === "error"
+              ? "compile error"
+              : status === "compiling"
+                ? "compiling…"
+                : "compiled"
+          }
         />
       </div>
 

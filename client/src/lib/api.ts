@@ -50,6 +50,23 @@ export async function compile(
   }
 }
 
+/** Project files in the compile session (aux files + agent-generated figures). */
+export async function fetchSessionFiles(sessionId: string): Promise<string[]> {
+  try {
+    const res = await fetch(`/api/session-files?sessionId=${encodeURIComponent(sessionId)}`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { files?: unknown };
+    return Array.isArray(data.files) ? data.files.filter((f): f is string => typeof f === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** URL that serves one session file's content (for image/text previews). */
+export function sessionFileUrl(sessionId: string, name: string): string {
+  return `/api/session-file?sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -78,6 +95,9 @@ export interface StreamHandlers {
 export interface ChatBody {
   provider: string;
   model: string;
+  /** The editor's compile session, shared with the agent so generated files
+   * (figures from run_python) resolve when the preview recompiles. */
+  sessionId?: string;
   documentText: string;
   /** Auxiliary project files (refs.bib, sections/…) for the agent's compile sandbox. */
   files?: Record<string, string>;

@@ -74,7 +74,7 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - `read_document()` — reads the current working copy back, so the model can re-anchor after a failed edit.
 - `compile_check()` — compiles the working copy with Tectonic and returns success or the error log.
 - `web_search(query)` — researches on the web (DuckDuckGo by default; Tavily/Brave with a key).
-- `run_python(code)` — runs Python (matplotlib/numpy) in the build dir, mainly to generate figures you then `\includegraphics`.
+- `run_python(code)` — runs Python (matplotlib/numpy) in the build dir, mainly to generate figures you then `\includegraphics`. The agent compiles in the **same session directory as your preview**, so a generated figure still resolves after you accept the edit. Generated files appear in the editor's file tree (purple dot); click one to preview it.
 - `view_pdf()` — compiles and **inspects the PDF's actual layout**, returning a text report the model can act on: page count/paper size, per-page text coverage and margins, content clipped at page edges, Overfull `\hbox` lines with `main.tex` line numbers, near-empty trailing pages, and font usage. This is how text-only local models "see" the result; vision-capable models additionally get the rendered page images.
 - `ats_check(job_description?)` — extracts the compiled PDF's text and reports ATS parseability, contact/section coverage, and keyword match against a posting.
 

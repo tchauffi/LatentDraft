@@ -1,5 +1,11 @@
 import express from "express";
-import { compileTex, writeSessionFiles, cleanupStaleSessions } from "./compile.js";
+import {
+  compileTex,
+  writeSessionFiles,
+  cleanupStaleSessions,
+  listSessionFiles,
+  sessionFilePath,
+} from "./compile.js";
 import { listProviders } from "./providers.js";
 import { streamChat, type ChatRequest } from "./chat.js";
 
@@ -53,6 +59,26 @@ app.post("/api/compile", async (req, res) => {
   }
 });
 
+/** Project files in a compile session (aux files + generated figures) — feeds the file tree. */
+app.get("/api/session-files", async (req, res) => {
+  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "default";
+  res.json({ files: await listSessionFiles(sessionId) });
+});
+
+/** Serve one session file (e.g. a generated PNG) for previewing in the client. */
+app.get("/api/session-file", (req, res) => {
+  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "default";
+  const name = typeof req.query.name === "string" ? req.query.name : "";
+  const filePath = sessionFilePath(sessionId, name);
+  if (!filePath) {
+    res.status(400).json({ error: "Bad file name." });
+    return;
+  }
+  res.sendFile(filePath, (err) => {
+    if (err && !res.headersSent) res.status(404).json({ error: "Not found." });
+  });
+});
+
 app.post("/api/chat", async (req, res) => {
   const body = req.body as Partial<ChatRequest>;
   if (!body || !body.provider || !body.model || !Array.isArray(body.messages)) {
@@ -62,8 +88,15 @@ app.post("/api/chat", async (req, res) => {
   await streamChat(res, {
     provider: body.provider,
     model: body.model,
+    sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
     documentText: typeof body.documentText === "string" ? body.documentText : "",
     files: stringFiles(body.files),
+    lastCompile:
+      body.lastCompile &&
+      typeof body.lastCompile.ok === "boolean" &&
+      typeof body.lastCompile.log === "string"
+        ? { ok: body.lastCompile.ok, log: body.lastCompile.log }
+        : undefined,
     messages: body.messages,
   });
 });

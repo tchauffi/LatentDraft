@@ -308,10 +308,112 @@ body {
   color: #b8b2a8;
   font-size: 13px;
   margin-left: 2px;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 3px;
 }
 .tab-close:hover {
   color: var(--text-2);
+  background: var(--line-soft);
 }
+/* Previewed (generated) file — transient buffer, italic like editor previews. */
+.tab-preview {
+  font-style: italic;
+}
+/* ---- File tree ---- */
+.editor-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.tree-toggle {
+  flex: none;
+  width: 32px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-right: 1px solid var(--line-soft);
+}
+.tree-toggle:hover,
+.tree-toggle-on {
+  color: var(--accent);
+}
+.filetree {
+  flex: none;
+  width: 168px;
+  overflow: auto;
+  background: var(--strip);
+  border-right: 1px solid var(--line-soft);
+  padding: 6px 0;
+  font-size: 12px;
+}
+.filetree-level {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.filetree-level .filetree-level {
+  padding-left: 14px;
+}
+.filetree-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.filetree-row:hover {
+  color: var(--text);
+}
+.filetree-dir {
+  cursor: default;
+}
+.filetree-dir:hover {
+  color: var(--text-dim);
+}
+.filetree-active {
+  color: var(--text);
+  background: var(--panel);
+  border-right: 2px solid var(--accent);
+  font-weight: 500;
+}
+.filetree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.filetree-gen {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--purple, #7c5cff);
+  margin-left: auto;
+}
+.file-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--pdf-bg);
+  padding: 18px;
+}
+.file-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  background: #fff;
+  border: 1px solid var(--line);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+.file-preview iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
 .editor-body {
   overflow: hidden;
 }
@@ -987,6 +1089,12 @@ body {
   display: flex;
   gap: 6px;
   margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.chip-more {
+  color: var(--text-dim);
+  background: none;
+  border: 1px dashed var(--line);
 }
 .chip {
   display: inline-flex;
