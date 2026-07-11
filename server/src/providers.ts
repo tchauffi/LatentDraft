@@ -1,7 +1,7 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createAnthropic } from "@ai-sdk/anthropic";
 
-export type ProviderId = "ollama" | "openai-compatible" | "anthropic";
+export type ProviderId = "ollama" | "ollama-cloud" | "openai-compatible" | "anthropic";
 
 export interface ProviderInfo {
   id: ProviderId;
@@ -33,6 +33,30 @@ const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? 16384);
 
 /** Tag that marks the derived context variants we create ("ollama rm" to clean up). */
 const VARIANT_TAG = "latentdraft";
+
+/**
+ * Ollama Cloud, used DIRECTLY (https://ollama.com with an API key) rather than
+ * proxied through the local daemon. Set OLLAMA_CLOUD_API_KEY (or OLLAMA_API_KEY)
+ * to enable. Model list comes from the cloud /api/tags; OLLAMA_CLOUD_MODELS
+ * overrides it when set (comma-separated).
+ */
+const OLLAMA_CLOUD_BASE_URL = process.env.OLLAMA_CLOUD_BASE_URL ?? "https://ollama.com";
+const OLLAMA_CLOUD_API_KEY =
+  process.env.OLLAMA_CLOUD_API_KEY ?? process.env.OLLAMA_API_KEY;
+const OLLAMA_CLOUD_MODELS = (process.env.OLLAMA_CLOUD_MODELS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/**
+ * A signed-in local daemon lists Ollama Cloud models alongside local ones
+ * (they carry a "-cloud" suffix). They run remotely: baking a num_ctx variant
+ * is meaningless (and /api/create may reject it), and the local NUM_CTX cap
+ * does not apply to their context window.
+ */
+export function isOllamaCloudModel(modelId: string): boolean {
+  return /-cloud(:|$)/.test(modelId);
+}
 
 /** OpenAI-compatible host (LM Studio, OpenRouter, vLLM, a hosted OpenAI, ...). */
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL; // e.g. https://api.openai.com/v1
@@ -77,17 +101,44 @@ async function listOllamaModels(): Promise<string[]> {
   }
 }
 
+/** Models available on Ollama Cloud, via its /api/tags. The catalog endpoint
+ * is PUBLIC (only chatting needs the API key), so list regardless of key —
+ * the picker can show what's available even before the key is configured.
+ * OLLAMA_CLOUD_MODELS overrides the listing when set. */
+async function listOllamaCloudModels(): Promise<string[]> {
+  if (OLLAMA_CLOUD_MODELS.length > 0) return OLLAMA_CLOUD_MODELS;
+  try {
+    const res = await fetch(`${OLLAMA_CLOUD_BASE_URL}/api/tags`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { models?: OllamaTag[] };
+    return (data.models ?? []).map((m) => m.name).sort();
+  } catch {
+    return [];
+  }
+}
+
 const nativeContextCache = new Map<string, number | undefined>();
 
 /** The model's native maximum context, from Ollama's model metadata
- * (`model_info["<arch>.context_length"]`). Undefined when unavailable. */
-async function ollamaNativeContext(modelId: string): Promise<number | undefined> {
-  if (nativeContextCache.has(modelId)) return nativeContextCache.get(modelId);
+ * (`model_info["<arch>.context_length"]`). Works against the local daemon or,
+ * with an API key, Ollama Cloud. Undefined when unavailable. */
+async function ollamaNativeContext(
+  modelId: string,
+  baseUrl = OLLAMA_BASE_URL,
+  apiKey?: string,
+): Promise<number | undefined> {
+  const cacheKey = `${baseUrl}:${modelId}`;
+  if (nativeContextCache.has(cacheKey)) return nativeContextCache.get(cacheKey);
   let ctx: number | undefined;
   try {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/show`, {
+    const res = await fetch(`${baseUrl}/api/show`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
       body: JSON.stringify({ model: modelId }),
       signal: AbortSignal.timeout(5000),
     });
@@ -101,7 +152,7 @@ async function ollamaNativeContext(modelId: string): Promise<number | undefined>
   } catch {
     /* leave unknown */
   }
-  nativeContextCache.set(modelId, ctx);
+  nativeContextCache.set(cacheKey, ctx);
   return ctx;
 }
 
@@ -129,6 +180,9 @@ const ensuredVariants = new Set<string>();
  * the old behavior instead of blocking chat.
  */
 export async function ensureOllamaContextVariant(modelId: string): Promise<string> {
+  // Cloud models proxied by the local daemon run remotely with their own
+  // (large) context — a local num_ctx variant is meaningless for them.
+  if (isOllamaCloudModel(modelId)) return modelId;
   if (!(OLLAMA_NUM_CTX > 0) || modelId.endsWith(`:${VARIANT_TAG}`)) return modelId;
   const name = `${modelId.replace(/[:/]/g, "-")}-ctx${OLLAMA_NUM_CTX}:${VARIANT_TAG}`;
   if (ensuredVariants.has(name)) return name;
@@ -163,8 +217,19 @@ export async function listProviders(): Promise<ProviderInfo[]> {
   const ollamaContext: Record<string, number> = {};
   await Promise.all(
     ollamaModels.map(async (m) => {
-      const eff = effectiveOllamaContext(await ollamaNativeContext(m));
+      const native = await ollamaNativeContext(m);
+      // Daemon-proxied cloud models run remotely: NUM_CTX does not cap them.
+      const eff = isOllamaCloudModel(m) ? native : effectiveOllamaContext(native);
       if (eff) ollamaContext[m] = eff;
+    }),
+  );
+
+  const cloudModels = await listOllamaCloudModels();
+  const cloudContext: Record<string, number> = {};
+  await Promise.all(
+    cloudModels.map(async (m) => {
+      const native = await ollamaNativeContext(m, OLLAMA_CLOUD_BASE_URL, OLLAMA_CLOUD_API_KEY);
+      if (native) cloudContext[m] = native;
     }),
   );
 
@@ -179,6 +244,18 @@ export async function listProviders(): Promise<ProviderInfo[]> {
         ollamaModels.length > 0
           ? undefined
           : `No models found at ${OLLAMA_BASE_URL}. Is 'ollama serve' running and a model pulled?`,
+    },
+    {
+      id: "ollama-cloud",
+      label: "Ollama Cloud",
+      available: Boolean(OLLAMA_CLOUD_API_KEY) && cloudModels.length > 0,
+      models: cloudModels,
+      context: cloudContext,
+      note: OLLAMA_CLOUD_API_KEY
+        ? cloudModels.length
+          ? undefined
+          : `No models listed by ${OLLAMA_CLOUD_BASE_URL} — set OLLAMA_CLOUD_MODELS to name them explicitly.`
+        : "Set OLLAMA_CLOUD_API_KEY to an ollama.com API key (create one at ollama.com/settings/keys) in the shell that runs the server, then restart. Signing in with 'ollama signin' is NOT enough for the direct cloud provider.",
     },
     {
       id: "openai-compatible",
@@ -222,6 +299,15 @@ export function getModel(providerId: ProviderId, modelId: string) {
       });
       return provider(modelId);
     }
+    case "ollama-cloud": {
+      if (!OLLAMA_CLOUD_API_KEY) throw new Error("OLLAMA_CLOUD_API_KEY is not configured.");
+      const provider = createOpenAICompatible({
+        name: "ollama-cloud",
+        baseURL: `${OLLAMA_CLOUD_BASE_URL}/v1`,
+        apiKey: OLLAMA_CLOUD_API_KEY,
+      });
+      return provider(modelId);
+    }
     case "openai-compatible": {
       if (!OPENAI_BASE_URL) throw new Error("OPENAI_BASE_URL is not configured.");
       const provider = createOpenAICompatible({
@@ -255,13 +341,16 @@ export async function modelSupportsVision(
   modelId: string,
 ): Promise<boolean> {
   if (providerId === "anthropic") return true; // all current Claude models are multimodal
-  if (providerId !== "ollama") return false; // openai-compatible: unknowable — play safe
+  if (providerId !== "ollama" && providerId !== "ollama-cloud") {
+    return false; // openai-compatible: unknowable — play safe
+  }
+  const baseUrl = providerId === "ollama-cloud" ? OLLAMA_CLOUD_BASE_URL : OLLAMA_BASE_URL;
   const key = `${providerId}:${modelId}`;
   const cached = visionCache.get(key);
   if (cached !== undefined) return cached;
   let vision = false;
   try {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/show`, {
+    const res = await fetch(`${baseUrl}/api/show`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: modelId }),

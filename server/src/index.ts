@@ -10,6 +10,12 @@ import {
 import { listProviders } from "./providers.js";
 import { streamChat, type ChatRequest } from "./chat.js";
 
+// Node's default warning output (e.g. MaxListenersExceededWarning) is one
+// line with no origin — print the stack so a report is actionable.
+process.on("warning", (w) => {
+  console.warn(`[server] ${w.name}: ${w.message}\n${w.stack ?? ""}`);
+});
+
 const app = express();
 const PORT = Number(process.env.PORT ?? 5174);
 // run_python executes arbitrary code — do not expose beyond this machine

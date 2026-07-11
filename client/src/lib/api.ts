@@ -1,5 +1,5 @@
 export interface ProviderInfo {
-  id: "ollama" | "openai-compatible" | "anthropic";
+  id: "ollama" | "ollama-cloud" | "openai-compatible" | "anthropic";
   label: string;
   available: boolean;
   models: string[];

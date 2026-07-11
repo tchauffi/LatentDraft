@@ -50,6 +50,8 @@ The server reads these at startup:
 | `TECTONIC_BIN`      | `./bin/tectonic`         | Path to the Tectonic binary                          |
 | `OLLAMA_BASE_URL`   | `http://localhost:11434` | Ollama host                                          |
 | `OLLAMA_NUM_CTX`    | `16384`                  | Context window for Ollama models. Ollama's default (4096) silently truncates the prompt — losing the agent's instructions — on any real task, so the server creates a derived `<model>-ctx<N>:latentdraft` variant with this context baked in and uses it transparently (`ollama rm` the variants to clean up; `0` disables). |
+| `OLLAMA_CLOUD_API_KEY` | —                     | Enables the "Ollama Cloud" provider (an [ollama.com](https://ollama.com) API key; `OLLAMA_API_KEY` works too). Signed-in daemons also proxy cloud models (`*-cloud` in `ollama list`) through the local provider with no key needed |
+| `OLLAMA_CLOUD_MODELS` | —                      | Comma-separated cloud model ids to show instead of the cloud listing (e.g. `gpt-oss:120b,qwen3-coder:480b`) |
 | `OPENAI_BASE_URL`   | —                        | Enables the "OpenAI-compatible" provider (e.g. `https://api.openai.com/v1`) |
 | `OPENAI_API_KEY`    | —                        | Key for the OpenAI-compatible endpoint               |
 | `OPENAI_MODELS`     | —                        | Comma-separated model ids to show in the picker      |
