@@ -2,6 +2,7 @@ import express from "express";
 import {
   compileTex,
   writeSessionFiles,
+  writeSessionUpload,
   cleanupStaleSessions,
   listSessionFiles,
   sessionFilePath,
@@ -64,6 +65,29 @@ app.get("/api/session-files", async (req, res) => {
   const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "default";
   res.json({ files: await listSessionFiles(sessionId) });
 });
+
+/** Upload a data file (CSV/Excel/…) into the compile session, raw bytes in the body. */
+app.put(
+  "/api/session-file",
+  express.raw({ type: () => true, limit: "25mb" }),
+  async (req, res) => {
+    const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "default";
+    const name = typeof req.query.name === "string" ? req.query.name : "";
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: "Empty upload body." });
+      return;
+    }
+    const rel = await writeSessionUpload(sessionId, name, req.body);
+    if (!rel) {
+      res.status(400).json({
+        error:
+          "Unsupported file. Allowed: csv, tsv, xlsx, xls, json, txt, dat, png, jpg, svg, pdf, bib.",
+      });
+      return;
+    }
+    res.json({ ok: true, file: rel });
+  },
+);
 
 /** Serve one session file (e.g. a generated PNG) for previewing in the client. */
 app.get("/api/session-file", (req, res) => {

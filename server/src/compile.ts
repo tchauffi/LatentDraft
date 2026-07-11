@@ -71,8 +71,10 @@ export async function writeSessionFiles(
   }
 }
 
-/** Build artifacts, view_pdf previews, run_python's scratch script — not project files. */
-const NON_PROJECT_FILE = /^main\.(tex|pdf|log|aux|out|toc|bbl|blg)$|^preview-\d+\.png$|^_agent_script\.py$/;
+/** Build artifacts, view_pdf previews, and underscore-prefixed scratch files
+ * (run_python's _agent_script.py, mermaid's _diagram.mmd/_puppeteer.json) —
+ * not project files. */
+const NON_PROJECT_FILE = /^main\.(tex|pdf|log|aux|out|toc|bbl|blg)$|^preview-\d+\.png$|^_/;
 
 /**
  * Project files present in a session's compile dir (aux files from earlier
@@ -98,6 +100,30 @@ export async function listSessionFiles(sessionId: string): Promise<string[]> {
     }
   }
   return files.sort();
+}
+
+/** File types a user may upload into the session (data files, images, bibs). */
+const UPLOAD_EXT = /\.(csv|tsv|xlsx|xls|json|txt|dat|png|jpe?g|svg|pdf|bib)$/i;
+
+/**
+ * Write one user-uploaded file (binary-safe) into a session's compile dir so
+ * run_python can read it (pandas) and \includegraphics/\input can resolve it.
+ * Returns the normalized relative path, or undefined when the name is unsafe,
+ * the extension is not allowed, or it would clobber main.tex.
+ */
+export async function writeSessionUpload(
+  sessionId: string,
+  name: string,
+  data: Buffer,
+): Promise<string | undefined> {
+  const rel = safeRelPath(name);
+  if (!rel || rel === "main.tex" || !UPLOAD_EXT.test(rel) || NON_PROJECT_FILE.test(rel)) {
+    return undefined;
+  }
+  const target = path.join(safeSessionDir(sessionId), rel);
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, data);
+  return rel;
 }
 
 /**
@@ -247,6 +273,143 @@ export function sourceAtLines(
   return out.join("\n");
 }
 
+/** Environments whose body TeX reads verbatim — \begin/\end tokens inside them
+ * are literal text, except the env's own \end. */
+const VERBATIM_ENVS = new Set(["verbatim", "verbatim*", "Verbatim", "lstlisting", "minted"]);
+
+export interface EnvironmentIssue {
+  /** e.g. "\begin{frame} opened at line 63 is never closed …" */
+  description: string;
+  /** Line in main.tex to quote: the unclosed \begin, or the stray \end. */
+  line: number;
+}
+
+/**
+ * Balance-check \begin/\end pairs in the source. Needed because "File ended
+ * while scanning use of …" errors carry NO line number at all — TeX only
+ * notices the problem at end of file, long after the unclosed \begin. Stack
+ * matching attributes the leftover open environment to the right line even
+ * when later same-name pairs are balanced (each \end closes the innermost
+ * open env, so the one missing its \end is the one left on the stack).
+ * Comments and verbatim bodies are skipped.
+ */
+export function findEnvironmentIssues(tex: string): EnvironmentIssue[] {
+  const issues: EnvironmentIssue[] = [];
+  const stack: { env: string; line: number }[] = [];
+  let verbatim: string | undefined;
+  const lines = tex.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const lineNo = i + 1;
+    // Cut the line at the first unescaped % — the rest is a comment.
+    const code = lines[i].match(/^(?:\\.|[^\\%])*/)?.[0] ?? lines[i];
+    for (const m of code.matchAll(/\\(begin|end)\s*\{([^}]*)\}/g)) {
+      const [, kind, env] = m;
+      if (verbatim) {
+        if (!(kind === "end" && env === verbatim)) continue; // literal text
+        verbatim = undefined; // fall through: this \end still pops the stack
+      }
+      if (kind === "begin") {
+        if (VERBATIM_ENVS.has(env)) verbatim = env;
+        stack.push({ env, line: lineNo });
+        continue;
+      }
+      if (stack.length && stack[stack.length - 1].env === env) {
+        stack.pop();
+        continue;
+      }
+      // \end doesn't match the innermost open env: either envs opened after
+      // its \begin were never closed, or it is a stray \end.
+      let matchAt = -1;
+      for (let k = stack.length - 1; k >= 0; k--) {
+        if (stack[k].env === env) {
+          matchAt = k;
+          break;
+        }
+      }
+      if (matchAt === -1) {
+        issues.push({
+          description: `\\end{${env}} at line ${lineNo} has no matching \\begin{${env}}`,
+          line: lineNo,
+        });
+        continue;
+      }
+      for (let k = stack.length - 1; k > matchAt; k--) {
+        issues.push({
+          description:
+            `\\begin{${stack[k].env}} opened at line ${stack[k].line} is never closed — ` +
+            `it is still open when \\end{${env}} at line ${lineNo} is reached. ` +
+            `Add the missing \\end{${stack[k].env}}`,
+          line: stack[k].line,
+        });
+      }
+      stack.length = matchAt;
+    }
+  }
+  for (const open of stack) {
+    issues.push({
+      description:
+        `\\begin{${open.env}} opened at line ${open.line} is never closed ` +
+        `(the file ends while it is still open). Add the missing \\end{${open.env}}`,
+      line: open.line,
+    });
+  }
+  return issues;
+}
+
+/**
+ * Locate the cause of no-line-number failures ("File ended while scanning use
+ * of \beamer@collect@@body", "Runaway argument?"). Their console output is
+ * actively misleading: the only line numbers in it belong to "Missing
+ * character … nullfont" warnings, which are downstream symptoms. Scan the
+ * source ourselves and quote the unclosed \begin so the model fixes the cause.
+ */
+export function diagnoseUnbalanced(
+  consoleLog: string,
+  details: string,
+  tex: string,
+): string | undefined {
+  const combined = consoleLog + "\n" + details;
+  if (!/File ended while scanning|Runaway argument|\\end occurred inside a group/i.test(combined)) {
+    return undefined;
+  }
+  const parts: string[] = [
+    'This "File ended while scanning"-type error carries NO line number because TeX only ' +
+      "noticed the problem at the end of the file: something opened earlier is never closed, " +
+      "so the real defect is EARLIER in the document.",
+  ];
+  if (/beamer@collect@@body/.test(combined)) {
+    parts.push(
+      "\\beamer@collect@@body means beamer was still collecting a frame body: " +
+        "a \\begin{frame} is missing its \\end{frame}.",
+    );
+  }
+  if (/nullfont/.test(consoleLog)) {
+    parts.push(
+      'The "Missing character … nullfont" warnings are a downstream symptom of the same ' +
+        "problem, not separate errors — do NOT edit the lines they mention.",
+    );
+  }
+  const issues = findEnvironmentIssues(tex).slice(0, 5);
+  if (issues.length === 0) {
+    parts.push(
+      "An environment balance scan found every \\begin/\\end matched, so the culprit is an " +
+        "unclosed brace group: look for a { without its } (often in a command argument).",
+    );
+    return parts.join(" ");
+  }
+  return (
+    parts.join(" ") +
+    `\n\nEnvironment scan of main.tex found:\n` +
+    issues.map((i) => `- ${i.description}`).join("\n") +
+    `\n\nmain.tex source at the unclosed \\begin line(s) — anchor your fix on this EXACT text. ` +
+    `The "> N:"/"  N:" prefixes are line-number annotations, NOT part of the file:\n` +
+    sourceAtLines(
+      tex,
+      issues.map((i) => i.line),
+    )
+  );
+}
+
 /**
  * Per-session compile queue. Two Tectonic processes must never run in the same
  * directory at once (they share main.tex/main.pdf), so compiles for a given
@@ -330,8 +493,13 @@ async function compileTexNow(dir: string, tex: string): Promise<CompileResult> {
             `The "> N:"/"  N:" prefixes are line-number annotations, NOT part of the file:\n` +
             sourceAtLines(tex, errLines)
           : "";
+        // No-line-number failures (unclosed frame/environment) get a source
+        // scan instead — the console output for those points at symptom lines.
+        const unbalanced = diagnoseUnbalanced(log, details, tex);
         const full =
-          (details ? `${log}\n\nError details from main.log:\n${details}` : log) + source;
+          (details ? `${log}\n\nError details from main.log:\n${details}` : log) +
+          source +
+          (unbalanced ? `\n\n${unbalanced}` : "");
         resolve({ ok: false, log: withHint(full || `Tectonic exited with code ${code}`) });
         return;
       }

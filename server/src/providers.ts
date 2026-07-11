@@ -12,6 +12,10 @@ export interface ProviderInfo {
   models: string[];
   /** Reason it is unavailable, for the UI. */
   note?: string;
+  /** modelId → usable context window in tokens, when known. For Ollama this is
+   * the EFFECTIVE window (the num_ctx we bake in, capped at the model's native
+   * maximum), since that is where silent truncation actually starts. */
+  context?: Record<string, number>;
 }
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
@@ -37,6 +41,13 @@ const OPENAI_MODELS = (process.env.OPENAI_MODELS ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+/** Context window to report for OpenAI-compatible models (the server can't
+ * discover it — LM Studio/vLLM/OpenRouter all differ). Unset = unknown. */
+const OPENAI_CONTEXT_LENGTH = Number(process.env.OPENAI_CONTEXT_LENGTH ?? 0);
+
+/** All current Claude models have (at least) a 200k context window. */
+const ANTHROPIC_CONTEXT_LENGTH = 200_000;
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_MODELS = (process.env.ANTHROPIC_MODELS ?? "claude-opus-4-8,claude-sonnet-5")
@@ -64,6 +75,48 @@ async function listOllamaModels(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+const nativeContextCache = new Map<string, number | undefined>();
+
+/** The model's native maximum context, from Ollama's model metadata
+ * (`model_info["<arch>.context_length"]`). Undefined when unavailable. */
+async function ollamaNativeContext(modelId: string): Promise<number | undefined> {
+  if (nativeContextCache.has(modelId)) return nativeContextCache.get(modelId);
+  let ctx: number | undefined;
+  try {
+    const res = await fetch(`${OLLAMA_BASE_URL}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: modelId }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { model_info?: Record<string, unknown> };
+      const info = data.model_info ?? {};
+      const arch = info["general.architecture"];
+      const raw = typeof arch === "string" ? info[`${arch}.context_length`] : undefined;
+      if (typeof raw === "number" && raw > 0) ctx = raw;
+    }
+  } catch {
+    /* leave unknown */
+  }
+  nativeContextCache.set(modelId, ctx);
+  return ctx;
+}
+
+/**
+ * The context window an Ollama model EFFECTIVELY runs with here: the num_ctx
+ * we bake into the derived variant, capped at the model's native maximum.
+ * With variants disabled (numCtx <= 0) it is the native window — though
+ * Ollama's own small default then truncates far earlier.
+ */
+export function effectiveOllamaContext(
+  native: number | undefined,
+  numCtx = OLLAMA_NUM_CTX,
+): number | undefined {
+  if (!(numCtx > 0)) return native;
+  return native ? Math.min(native, numCtx) : numCtx;
 }
 
 const ensuredVariants = new Set<string>();
@@ -107,12 +160,21 @@ export async function ensureOllamaContextVariant(modelId: string): Promise<strin
 export async function listProviders(): Promise<ProviderInfo[]> {
   const ollamaModels = await listOllamaModels();
 
+  const ollamaContext: Record<string, number> = {};
+  await Promise.all(
+    ollamaModels.map(async (m) => {
+      const eff = effectiveOllamaContext(await ollamaNativeContext(m));
+      if (eff) ollamaContext[m] = eff;
+    }),
+  );
+
   const providers: ProviderInfo[] = [
     {
       id: "ollama",
       label: "Ollama (local)",
       available: ollamaModels.length > 0,
       models: ollamaModels,
+      context: ollamaContext,
       note:
         ollamaModels.length > 0
           ? undefined
@@ -123,6 +185,10 @@ export async function listProviders(): Promise<ProviderInfo[]> {
       label: "OpenAI-compatible",
       available: Boolean(OPENAI_BASE_URL),
       models: OPENAI_MODELS,
+      context:
+        OPENAI_CONTEXT_LENGTH > 0
+          ? Object.fromEntries(OPENAI_MODELS.map((m) => [m, OPENAI_CONTEXT_LENGTH]))
+          : undefined,
       note: OPENAI_BASE_URL
         ? OPENAI_MODELS.length
           ? undefined
@@ -134,6 +200,7 @@ export async function listProviders(): Promise<ProviderInfo[]> {
       label: "Anthropic",
       available: Boolean(ANTHROPIC_API_KEY),
       models: ANTHROPIC_MODELS,
+      context: Object.fromEntries(ANTHROPIC_MODELS.map((m) => [m, ANTHROPIC_CONTEXT_LENGTH])),
       note: ANTHROPIC_API_KEY ? undefined : "Set ANTHROPIC_API_KEY to enable.",
     },
   ];

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
@@ -26,6 +26,8 @@ interface Props {
   generatedFiles?: string[];
   /** URL serving a session file's content, for previews of generated files. */
   fileUrl?: (name: string) => string;
+  /** Upload a data file into the compile session; resolves to an error message or null. */
+  onUpload?: (file: File) => Promise<string | null>;
   /** Pending agent edits to render inline (Cursor-style accept/reject). */
   suggestions?: ProposedEdit[];
   onAcceptSuggestion?: (edit: ProposedEdit) => void;
@@ -101,11 +103,14 @@ export default function EditorPane({
   onCloseTab,
   generatedFiles,
   fileUrl,
+  onUpload,
   suggestions,
   onAcceptSuggestion,
   onRejectSuggestion,
 }: Props) {
   const [showTree, setShowTree] = useState(true);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   // A generated (server-side) file being previewed instead of the editor.
   // `stamp` busts the browser cache so a regenerated figure re-renders.
   const [preview, setPreview] = useState<{ path: string; stamp: number } | null>(null);
@@ -199,6 +204,30 @@ export default function EditorPane({
               preview={activePreview?.path ?? null}
               onPick={pick}
             />
+            {onUpload && (
+              <div className="filetree-upload">
+                <button
+                  className="filetree-upload-btn"
+                  title="Add a data file (CSV, Excel, image, …) for the agent to use"
+                  onClick={() => uploadInputRef.current?.click()}
+                >
+                  + Add data file
+                </button>
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  accept=".csv,.tsv,.xlsx,.xls,.json,.txt,.dat,.png,.jpg,.jpeg,.svg,.pdf,.bib"
+                  style={{ display: "none" }}
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = ""; // allow re-uploading the same name
+                    if (!f) return;
+                    setUploadError(await onUpload(f));
+                  }}
+                />
+                {uploadError && <div className="filetree-upload-err">{uploadError}</div>}
+              </div>
+            )}
           </div>
         )}
         {activePreview && fileUrl ? (

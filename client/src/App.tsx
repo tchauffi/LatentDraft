@@ -5,7 +5,13 @@ import PreviewPane, { type PreviewStatus } from "./panes/PreviewPane";
 import ChatPane from "./panes/ChatPane";
 import TopToolbar from "./components/TopToolbar";
 import StatusBar from "./components/StatusBar";
-import { compile, fetchSessionFiles, sessionFileUrl, type ProposedEdit } from "./lib/api";
+import {
+  compile,
+  fetchSessionFiles,
+  sessionFileUrl,
+  uploadSessionFile,
+  type ProposedEdit,
+} from "./lib/api";
 import { applyEdit as applyEditToDoc, type ApplyResult } from "./lib/diff";
 
 const MAIN = "main.tex";
@@ -144,6 +150,17 @@ export default function App() {
   );
   const fileUrl = useCallback((name: string) => sessionFileUrl(sessionId, name), [sessionId]);
 
+  /** Upload a data file into the session; returns an error message or null. */
+  const uploadFile = useCallback(
+    async (file: File): Promise<string | null> => {
+      const res = await uploadSessionFile(sessionId, file);
+      if (!res.ok) return res.error;
+      await refreshSessionFiles();
+      return null;
+    },
+    [sessionId, refreshSessionFiles],
+  );
+
   // Debounced compile whenever any file changes (aux files feed \input/\bibliography).
   useEffect(() => {
     const t = setTimeout(() => void runCompile(files[MAIN]), DEBOUNCE_MS);
@@ -235,6 +252,7 @@ export default function App() {
                 onCloseTab={closeTab}
                 generatedFiles={generatedFiles}
                 fileUrl={fileUrl}
+                onUpload={uploadFile}
                 suggestions={active === MAIN ? pendingEdits : undefined}
                 onAcceptSuggestion={acceptSuggestion}
                 onRejectSuggestion={rejectSuggestion}

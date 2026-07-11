@@ -4,6 +4,8 @@ export interface ProviderInfo {
   available: boolean;
   models: string[];
   note?: string;
+  /** modelId → usable context window in tokens, when the server knows it. */
+  context?: Record<string, number>;
 }
 
 export interface ProposedEdit {
@@ -65,6 +67,25 @@ export async function fetchSessionFiles(sessionId: string): Promise<string[]> {
 /** URL that serves one session file's content (for image/text previews). */
 export function sessionFileUrl(sessionId: string, name: string): string {
   return `/api/session-file?sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`;
+}
+
+/** Upload a data file (CSV/Excel/…) into the compile session. */
+export async function uploadSessionFile(
+  sessionId: string,
+  file: File,
+): Promise<{ ok: true; file: string } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(sessionFileUrl(sessionId, file.name), {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    const data = (await res.json().catch(() => ({}))) as { file?: string; error?: string };
+    if (res.ok && data.file) return { ok: true, file: data.file };
+    return { ok: false, error: data.error ?? `upload failed (${res.status})` };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
 }
 
 export interface ChatMessage {

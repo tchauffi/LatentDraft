@@ -4,6 +4,7 @@ import { compileTex } from "./compile.js";
 import { sessionDir } from "./compile.js";
 import { webSearch } from "./research.js";
 import { runPython } from "./python.js";
+import { renderMermaid } from "./mermaid.js";
 import { renderPdf, extractPdfText, analyzePdfLayout } from "./pdftools.js";
 import { formatLayoutReport } from "./layout.js";
 import { analyzeAts } from "./ats.js";
@@ -237,13 +238,15 @@ export function createAgentTools(opts: AgentToolsOptions) {
   const run_python = createTool({
     id: "run_python",
     description:
-      "Run a Python 3 snippet (matplotlib, numpy available) in the document's build " +
-      "directory. Use it mainly to GENERATE FIGURES: save a plot as a PNG, e.g. " +
-      "`plt.savefig('figure.png', dpi=200, bbox_inches='tight')`, then add " +
-      "`\\includegraphics{figure.png}` to the document with edit_document. Files you write " +
-      "here sit next to the .tex, so reference them by bare filename. matplotlib uses a " +
-      "headless backend; do not call plt.show(). 30s time limit. Returns stdout/stderr and " +
-      "the list of files created.",
+      "Run a Python 3 snippet (matplotlib, seaborn, pandas, numpy, openpyxl available) in " +
+      "the document's build directory. Use it mainly to GENERATE FIGURES: save a plot as a " +
+      "PNG, e.g. `plt.savefig('figure.png', dpi=200, bbox_inches='tight')`, then add " +
+      "`\\includegraphics{figure.png}` to the document with edit_document. Data files the " +
+      "user uploaded (CSV/Excel) sit in the same directory — load them with " +
+      "`pd.read_csv('data.csv')` / `pd.read_excel('data.xlsx')` and plot with seaborn. " +
+      "Files you write here sit next to the .tex, so reference them by bare filename. " +
+      "matplotlib uses a headless backend; do not call plt.show(). 30s time limit. " +
+      "Returns stdout/stderr and the list of files created.",
     inputSchema: z.object({
       code: z.string().describe("The Python source to execute."),
     }),
@@ -262,6 +265,38 @@ export function createAgentTools(opts: AgentToolsOptions) {
       return `${res.ok ? "Python ran successfully." : "Python exited with an error."}\n\nOutput:\n${
         res.output || "(no output)"
       }${filesLine}`;
+    },
+  });
+
+  const render_mermaid = createTool({
+    id: "render_mermaid",
+    description:
+      "Render a Mermaid diagram (flowchart, sequence, class, state, ER, gantt, pie, " +
+      "mindmap, …) to a PNG in the document's build directory. Pass the raw Mermaid " +
+      "source (no ``` fences). On success, add the diagram to the document with " +
+      "edit_document: \\includegraphics[width=…]{<filename>}. On a syntax error the " +
+      "Mermaid parser message is returned — fix the source and retry.",
+    inputSchema: z.object({
+      code: z
+        .string()
+        .describe('Mermaid source, e.g. "flowchart LR\\n  A[Idea] --> B[Draft]".'),
+      filename: z
+        .string()
+        .optional()
+        .describe('Output PNG name, e.g. "pipeline.png" (default "diagram.png").'),
+    }),
+    execute: async ({ context: { code, filename } }) => {
+      const res = await renderMermaid(opts.compileSessionId, code, filename);
+      emitTool({
+        name: "render_mermaid",
+        summary: res.ok ? `Rendered diagram → ${res.file}` : "Mermaid render failed",
+        ok: res.ok,
+      });
+      return res.ok
+        ? `Diagram rendered to ${res.file}. Now add it to the document with edit_document, ` +
+            `e.g. \\includegraphics[width=0.9\\textwidth]{${res.file}} (inside a figure ` +
+            `environment if it needs a caption), then compile_check.`
+        : `Mermaid rendering FAILED. Fix the diagram source and call render_mermaid again.\n\n${res.output}`;
     },
   });
 
@@ -351,7 +386,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
   }
 
   return {
-    tools: { edit_document, read_document, compile_check, web_search, run_python, view_pdf, ats_check },
+    tools: { edit_document, read_document, compile_check, web_search, run_python, render_mermaid, view_pdf, ats_check },
     getDoc: () => state.doc,
     /** True once the agent has compiled at least once this turn — after that,
      * the editor's pre-turn compile log is stale and should stop being shown. */
@@ -385,7 +420,8 @@ You have tools:
 - read_document(): read the CURRENT working copy (with your edits applied). Use it to re-anchor after a NOT APPLIED edit or whenever you are unsure what the document now contains.
 - compile_check(): compile the current working document and get back success or the error log.
 - web_search(query, max_results?): research anything on the web (job postings, companies, technologies, wording). Use it before writing when you need facts you don't have.
-- run_python(code): run Python (matplotlib/numpy) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Reference files by bare filename; do not call plt.show().
+- run_python(code): run Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Uploaded data files (CSV/Excel) are in the same directory: pd.read_csv("data.csv") / pd.read_excel("data.xlsx"), then plot with seaborn. Reference files by bare filename; do not call plt.show().
+- render_mermaid(code, filename?): render a Mermaid DIAGRAM (flowchart, sequence, class, state, ER, gantt, pie, mindmap) to a PNG in the build directory. Prefer it over Python for conceptual/structural diagrams. Pass raw Mermaid source (no fences), then edit_document to add \\includegraphics{<filename>}.
 - view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm.
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
 

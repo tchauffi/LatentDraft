@@ -1,4 +1,5 @@
 import type { Response } from "express";
+import { setMaxListeners } from "node:events";
 import { Agent } from "@mastra/core/agent";
 import { RuntimeContext } from "@mastra/core/runtime-context";
 import { nanoid } from "nanoid";
@@ -163,35 +164,51 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
     messages: ChatMessage[],
     system: string,
   ): Promise<{ text: string; calls: RecoveredToolCall[] }> {
-    const filter = new ToolCallStreamFilter(
-      knownToolNames,
-      (text) => write({ type: "text", text }),
-      [RECOVERY_CONTINUE_NOTE, RECOVERY_RESULTS_HEADER],
-    );
-    const stream = await agent.stream(messages as Parameters<typeof agent.stream>[0], {
-      instructions: system,
-      maxSteps: MAX_STEPS,
-      abortSignal: abort.signal,
-    });
-    for await (const chunk of stream.fullStream) {
-      const c = chunk as { type: string; payload?: Record<string, unknown> };
-      switch (c.type) {
-        case "text-delta":
-          filter.push(String(c.payload?.text ?? ""));
-          break;
-        case "error": {
-          const err = c.payload?.error;
-          write({
-            type: "error",
-            message: String(err instanceof Error ? err.message : (err ?? "stream error")),
-          });
-          break;
+    // Each round gets its OWN signal, chained to the request's. The AI SDK
+    // registers a listener per model step on whatever signal it is handed and
+    // only releases them when that signal dies — reusing the request signal
+    // across every round of a long turn accumulates listeners until Node
+    // prints MaxListenersExceededWarning. The chain listener is detached the
+    // moment the round finishes, so the request signal stays at ~2 listeners.
+    const round = new AbortController();
+    const propagate = () => round.abort();
+    abort.signal.addEventListener("abort", propagate, { once: true });
+    // One step ≈ one fetch ≈ one listener on the round signal; allow MAX_STEPS
+    // of them plus slack instead of Node's default 10.
+    setMaxListeners(MAX_STEPS + 8, round.signal);
+    try {
+      const filter = new ToolCallStreamFilter(
+        knownToolNames,
+        (text) => write({ type: "text", text }),
+        [RECOVERY_CONTINUE_NOTE, RECOVERY_RESULTS_HEADER],
+      );
+      const stream = await agent.stream(messages as Parameters<typeof agent.stream>[0], {
+        instructions: system,
+        maxSteps: MAX_STEPS,
+        abortSignal: round.signal,
+      });
+      for await (const chunk of stream.fullStream) {
+        const c = chunk as { type: string; payload?: Record<string, unknown> };
+        switch (c.type) {
+          case "text-delta":
+            filter.push(String(c.payload?.text ?? ""));
+            break;
+          case "error": {
+            const err = c.payload?.error;
+            write({
+              type: "error",
+              message: String(err instanceof Error ? err.message : (err ?? "stream error")),
+            });
+            break;
+          }
+          default:
+            break;
         }
-        default:
-          break;
       }
+      return filter.finish();
+    } finally {
+      abort.signal.removeEventListener("abort", propagate);
     }
-    return filter.finish();
   }
 
   /** Execute one recovered (text-form) tool call against the real agent tools. */

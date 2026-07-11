@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   fetchProviders,
   streamChat,
@@ -7,6 +9,7 @@ import {
   type ProposedEdit,
   type ToolActivity,
 } from "../lib/api";
+import { contextSeverity, estimateRequestTokens, formatTokens } from "../lib/context";
 import {
   parseLatexEditBlocks,
   stripLatexEditBlocks,
@@ -114,6 +117,30 @@ export default function ChatPane({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
+
+  // Estimated tokens the next request will occupy vs the model's window. The
+  // document lives outside this pane (no re-render on editor keystrokes), so
+  // refresh on a slow interval as well as on chat state changes.
+  const [ctxEstimate, setCtxEstimate] = useState(0);
+  useEffect(() => {
+    const compute = () => {
+      const lastCompile = getLastCompile?.();
+      setCtxEstimate(
+        estimateRequestTokens({
+          documentText: getDocument(),
+          history: messages,
+          draft: input,
+          compileLog: lastCompile && !lastCompile.ok ? lastCompile.log : undefined,
+        }),
+      );
+    };
+    compute();
+    const timer = setInterval(compute, 2000);
+    return () => clearInterval(timer);
+  }, [messages, input, getDocument, getLastCompile]);
+
+  const ctxWindow = currentProvider?.context?.[model];
+  const ctxSeverity = contextSeverity(ctxEstimate, ctxWindow);
 
   // Surface the pending edits to the editor pane (inline suggestions).
   useEffect(() => {
@@ -341,7 +368,19 @@ export default function ChatPane({
                 </div>
                 <div className="msg-assistant-content">
                   {m.activity.length > 0 && <ActivityList activity={m.activity} />}
-                  {m.content && <div className="msg-text">{m.content}</div>}
+                  {m.content && (
+                    <div className="msg-text">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          // eslint-disable-next-line jsx-a11y/anchor-has-content
+                          a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
+                        }}
+                      >
+                        {m.content}
+                      </ReactMarkdown>
+                    </div>
+                  )}
                   {m.check && <VerifyBanner check={m.check} />}
                   {m.edits.filter((e) => e.status === "pending").length >= 2 && (
                     <button className="accept-all" onClick={() => onAcceptAll(m)}>
@@ -415,6 +454,21 @@ export default function ChatPane({
           />
           <div className="composer-actions">
             <span className="composer-hint mono">Agent · edits files</span>
+            <span
+              className={`composer-hint mono ctx-info ctx-${ctxSeverity}`}
+              title={
+                `Estimated context use of the next agent request (document + chat history + prompt overhead)` +
+                (ctxWindow
+                  ? `, out of this model's ~${formatTokens(ctxWindow)}-token window.`
+                  : ". This model's context window is unknown.") +
+                (ctxSeverity === "over" || ctxSeverity === "warn"
+                  ? " Near or over the window the prompt gets truncated from the top (silently, on Ollama) — start a new chat or trim the document."
+                  : "")
+              }
+            >
+              {formatTokens(ctxEstimate)}
+              {ctxWindow ? ` / ${formatTokens(ctxWindow)}` : ""} ctx
+            </span>
             <div className="toolbar-spacer" />
             {streaming ? (
               <button className="composer-send" onClick={stop} title="Stop">

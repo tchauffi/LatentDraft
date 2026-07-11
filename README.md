@@ -22,11 +22,12 @@ The agent is **provider-agnostic**: it defaults to a local **Ollama** model (no 
   ollama pull qwen2.5-coder   # or llama3.1 / mistral-nemo — tool-capable models work best
   ```
   Models that can't call tools still work via a fenced-block edit fallback.
-- **Python** (for the `run_python` / `view_pdf` / `ats_check` tools) — a virtualenv with matplotlib, numpy and PyMuPDF at `server/.venv`. Create it once:
+- **Python** (for the `run_python` / `view_pdf` / `ats_check` tools) — a virtualenv with matplotlib, seaborn, pandas, numpy, openpyxl and PyMuPDF at `server/.venv`. Create it once:
   ```sh
-  cd server && python3 -m venv .venv && .venv/bin/pip install matplotlib numpy pymupdf
+  cd server && python3 -m venv .venv && .venv/bin/pip install matplotlib seaborn pandas numpy openpyxl pymupdf
   ```
   (Or point `PYTHON_BIN` at any interpreter that has those packages.)
+- **Mermaid** (for the `render_mermaid` tool) — installed automatically with `npm install` (`@mermaid-js/mermaid-cli`; puppeteer downloads a headless Chromium on first install).
 
 ## Install & run
 
@@ -52,6 +53,7 @@ The server reads these at startup:
 | `OPENAI_BASE_URL`   | —                        | Enables the "OpenAI-compatible" provider (e.g. `https://api.openai.com/v1`) |
 | `OPENAI_API_KEY`    | —                        | Key for the OpenAI-compatible endpoint               |
 | `OPENAI_MODELS`     | —                        | Comma-separated model ids to show in the picker      |
+| `OPENAI_CONTEXT_LENGTH` | —                    | Context window (tokens) of the OpenAI-compatible models, for the chat pane's context meter — the server can't discover it |
 | `ANTHROPIC_API_KEY` | —                        | Enables the Anthropic provider                       |
 | `ANTHROPIC_MODELS`  | `claude-opus-4-8,claude-sonnet-5` | Anthropic models to show                    |
 | `PYTHON_BIN`        | `server/.venv/bin/python` | Interpreter for `run_python`/`view_pdf`/`ats_check` |
@@ -74,7 +76,9 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - `read_document()` — reads the current working copy back, so the model can re-anchor after a failed edit.
 - `compile_check()` — compiles the working copy with Tectonic and returns success or the error log.
 - `web_search(query)` — researches on the web (DuckDuckGo by default; Tavily/Brave with a key).
-- `run_python(code)` — runs Python (matplotlib/numpy) in the build dir, mainly to generate figures you then `\includegraphics`. The agent compiles in the **same session directory as your preview**, so a generated figure still resolves after you accept the edit. Generated files appear in the editor's file tree (purple dot); click one to preview it.
+- `run_python(code)` — runs Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build dir, mainly to generate figures you then `\includegraphics`. The agent compiles in the **same session directory as your preview**, so a generated figure still resolves after you accept the edit. Generated files appear in the editor's file tree (purple dot); click one to preview it.
+- `render_mermaid(code, filename?)` — renders a Mermaid diagram (flowchart, sequence, class, state, ER, gantt, pie, mindmap, …) to a print-quality PNG in the build dir, for conceptual/structural figures that would be awkward to draw in matplotlib.
+- **Data import**: the *"+ Add data file"* button under the file tree uploads a CSV/Excel/image into the compile session — the agent can then `pd.read_csv`/`pd.read_excel` it in `run_python` and plot it with seaborn.
 - `view_pdf()` — compiles and **inspects the PDF's actual layout**, returning a text report the model can act on: page count/paper size, per-page text coverage and margins, content clipped at page edges, Overfull `\hbox` lines with `main.tex` line numbers, near-empty trailing pages, and font usage. This is how text-only local models "see" the result; vision-capable models additionally get the rendered page images.
 - `ats_check(job_description?)` — extracts the compiled PDF's text and reports ATS parseability, contact/section coverage, and keyword match against a posting.
 

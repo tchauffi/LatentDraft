@@ -6,11 +6,14 @@ import { writeFile } from "node:fs/promises";
 import {
   compileTex,
   writeSessionFiles,
+  writeSessionUpload,
   sessionDir,
   listSessionFiles,
   extractTexLogErrors,
   errorLineNumbers,
   sourceAtLines,
+  findEnvironmentIssues,
+  diagnoseUnbalanced,
 } from "../src/compile.js";
 
 // Integration tests: they run the real vendored Tectonic binary. The package
@@ -159,6 +162,17 @@ test("listSessionFiles reports project files but not build artifacts", async () 
   assert.deepEqual(await listSessionFiles(id), ["refs.bib", "sections/intro.tex", "sine_wave.png"]);
 });
 
+test("writeSessionUpload accepts data files and rejects unsafe or unknown ones", async () => {
+  const id = session("upload");
+  assert.equal(await writeSessionUpload(id, "data.csv", Buffer.from("a,b\n1,2\n")), "data.csv");
+  assert.equal(await writeSessionUpload(id, "report.xlsx", Buffer.from([0x50, 0x4b])), "report.xlsx");
+  assert.equal(await writeSessionUpload(id, "../escape.csv", Buffer.from("x")), undefined);
+  assert.equal(await writeSessionUpload(id, "main.tex", Buffer.from("x")), undefined);
+  assert.equal(await writeSessionUpload(id, "script.sh", Buffer.from("x")), undefined);
+  assert.equal(await writeSessionUpload(id, "_agent_script.py", Buffer.from("x")), undefined);
+  assert.deepEqual(await listSessionFiles(id), ["data.csv", "report.xlsx"]);
+});
+
 test("listSessionFiles returns empty for a session that never compiled", async () => {
   assert.deepEqual(await listSessionFiles(`${RUN}-never-existed`), []);
 });
@@ -187,6 +201,94 @@ test("sourceAtLines separates distant windows with an ellipsis", () => {
   assert.match(out, /> 2: line 2/);
   assert.match(out, /> 15: line 15/);
   assert.match(out, /…/);
+});
+
+// A beamer deck where the SECOND frame is missing its \end{frame}. Later
+// frames' \end{frame} lines each close the previous dangling frame, so TeX
+// only fails at end-of-file ("File ended while scanning use of
+// \beamer@collect@@body") with no line number anywhere in the output.
+const UNCLOSED_FRAME_TEX = [
+  "\\documentclass{beamer}", //            1
+  "\\begin{document}", //                  2
+  "\\begin{frame}{One}", //                3
+  "\\begin{itemize}", //                   4
+  "\\item fine", //                        5
+  "\\end{itemize}", //                     6
+  "\\end{frame}", //                       7
+  "\\begin{frame}{Two — unclosed}", //     8
+  "text", //                               9
+  "% \\end{frame}  <- commented out!", // 10
+  "\\section{Next}", //                   11
+  "\\begin{frame}{Three}", //             12
+  "more", //                              13
+  "\\end{frame}", //                      14
+  "\\end{document}", //                   15
+].join("\n");
+
+test("findEnvironmentIssues pinpoints the frame missing its \\end{frame}", () => {
+  const issues = findEnvironmentIssues(UNCLOSED_FRAME_TEX);
+  // Stack matching must blame line 8 (the dangling frame), not line 12:
+  // frame Three opens and closes normally on top of it, so frame Two is
+  // what's left open when \end{document} arrives.
+  assert.equal(issues.length, 1, JSON.stringify(issues));
+  assert.equal(issues[0].line, 8);
+  assert.match(issues[0].description, /\\begin\{frame\} opened at line 8/);
+  assert.match(issues[0].description, /Add the missing \\end\{frame\}/);
+});
+
+test("findEnvironmentIssues ignores comments and verbatim bodies", () => {
+  const tex = [
+    "\\begin{document}",
+    "% \\begin{frame}",
+    "\\begin{verbatim}",
+    "\\begin{frame}  <- literal text, not an environment",
+    "\\end{verbatim}",
+    "\\end{document}",
+  ].join("\n");
+  assert.deepEqual(findEnvironmentIssues(tex), []);
+});
+
+test("findEnvironmentIssues reports a stray \\end", () => {
+  const issues = findEnvironmentIssues("\\begin{document}\n\\end{itemize}\n\\end{document}");
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].line, 2);
+  assert.match(issues[0].description, /no matching \\begin\{itemize\}/);
+});
+
+test("diagnoseUnbalanced stays silent for errors that already have line numbers", () => {
+  assert.equal(
+    diagnoseUnbalanced("error: main.tex:5: Undefined control sequence", "l.5 \\badmacro", "x"),
+    undefined,
+  );
+});
+
+test("diagnoseUnbalanced explains the beamer file-ended error and quotes the source", () => {
+  const consoleLog =
+    'warning: main.tex:16: Missing character: There is no 5 ("35) in font nullfont!\n' +
+    "error: !File ended while scanning use of \\beamer@collect@@body\n";
+  const out = diagnoseUnbalanced(consoleLog, "", UNCLOSED_FRAME_TEX);
+  assert.ok(out, "must produce a diagnosis");
+  assert.match(out, /a \\begin\{frame\} is missing its \\end\{frame\}/);
+  assert.match(out, /nullfont.*symptom/is, "must defuse the misleading nullfont warnings");
+  assert.match(out, /\\begin\{frame\} opened at line 8/);
+  assert.match(out, /> 8: \\begin\{frame\}\{Two — unclosed\}/, "source quoted at the culprit line");
+});
+
+test("diagnoseUnbalanced falls back to a brace hint when environments balance", () => {
+  const out = diagnoseUnbalanced(
+    "Runaway argument?\n! File ended while scanning use of \\textbf.",
+    "",
+    "\\begin{document}\\textbf{oops\\end{document}",
+  );
+  assert.ok(out);
+  assert.match(out, /unclosed brace group/);
+});
+
+test("a beamer deck missing an \\end{frame} gets the unclosed-frame diagnosis in its log", async () => {
+  const result = await compileTex(session("frame"), UNCLOSED_FRAME_TEX);
+  assert.equal(result.ok, false);
+  assert.match(result.log, /opened at line 8 is never closed/);
+  assert.match(result.log, /> 8: \\begin\{frame\}\{Two — unclosed\}/);
 });
 
 test("concurrent compiles of one session serialize and each returns its own PDF", async () => {
