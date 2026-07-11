@@ -1,0 +1,19 @@
+{
+  "name": "latentdraft",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cursor-style LaTeX editor: raw editor, live PDF preview, and an AI agent that proposes edits.",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm -w server run dev",
+    "dev:client": "npm -w client run dev",
+    "build": "npm -w client run build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
