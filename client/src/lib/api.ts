@@ -81,6 +81,9 @@ export interface ChatBody {
   documentText: string;
   /** Auxiliary project files (refs.bib, sections/…) for the agent's compile sandbox. */
   files?: Record<string, string>;
+  /** Result of the editor's most recent compile — lets the agent start from
+   * the failure log the user is looking at instead of guessing. */
+  lastCompile?: { ok: boolean; log: string };
   messages: ChatMessage[];
 }
 

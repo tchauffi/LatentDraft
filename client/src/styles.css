@@ -315,11 +315,18 @@ body {
 .editor-body {
   overflow: hidden;
 }
+/* The react-codemirror wrapper (.cm-theme) has no intrinsic height; without
+   this it grows with the document, the pane clips it, and the editor cannot
+   scroll. Pinning the whole chain to 100% keeps scrolling inside .cm-scroller. */
+.editor-body > .cm-theme {
+  height: 100%;
+}
 .editor-body .cm-editor {
   height: 100%;
 }
 .editor-body .cm-scroller {
   font-family: var(--mono);
+  overflow: auto;
 }
 
 /* ---- Preview ---- */

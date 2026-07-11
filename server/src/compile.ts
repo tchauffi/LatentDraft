@@ -128,6 +128,86 @@ function diagnoseCrash(
 }
 
 /**
+ * Pull the detailed error blocks out of a TeX .log file. Tectonic's console
+ * output only says e.g. "error: main.tex:5: Undefined control sequence" — the
+ * .log has the part that makes the error fixable: which token failed and the
+ * offending source line ("<recently read> \badmacro", "l.5 \badmacro").
+ * Returns each "!" error line plus its context lines, blocks joined by blank
+ * lines; empty string when the log has no error blocks.
+ */
+export function extractTexLogErrors(texLog: string, maxChars = 2000): string {
+  const lines = texLog.split(/\r?\n/);
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith("!")) continue;
+    const block: string[] = [lines[i]];
+    // Context runs until the blank line after the "l.<num>" source line (TeX
+    // prints the offending line split in two), the next error, or a hard cap.
+    let sawSourceLine = false;
+    let j = i + 1;
+    for (; j < lines.length && block.length < 12; j++) {
+      const line = lines[j];
+      if (line.startsWith("!")) break;
+      if (sawSourceLine && line.trim() === "") break;
+      block.push(line);
+      if (/^l\.\d+/.test(line)) sawSourceLine = true;
+    }
+    blocks.push(block.join("\n").trimEnd());
+    i = j - 1;
+  }
+  const out = blocks.join("\n\n");
+  return out.length <= maxChars ? out : out.slice(0, maxChars) + "\n… (more errors omitted)";
+}
+
+/**
+ * Line numbers of errors in main.tex, from the console output
+ * ("error: main.tex:5: …") and the .log's "l.5 …" context lines. Bare "l.N"
+ * numbers refer to whatever file TeX was reading at the time, so they are only
+ * trusted when no console error names a different file.
+ */
+export function errorLineNumbers(consoleLog: string, logDetails: string): number[] {
+  const nums = new Set<number>();
+  let sawOtherFile = false;
+  for (const m of consoleLog.matchAll(/^error: ([^\s:]+):(\d+):/gm)) {
+    if (/(^|\/)main\.tex$/.test(m[1])) nums.add(Number(m[2]));
+    else sawOtherFile = true;
+  }
+  if (!sawOtherFile) {
+    for (const m of logDetails.matchAll(/^l\.(\d+)/gm)) nums.add(Number(m[1]));
+  }
+  return [...nums].sort((a, b) => a - b);
+}
+
+/**
+ * Quote the source around the reported error lines, numbered, with the error
+ * lines marked. Models cannot reliably COUNT lines in the document to find
+ * "main.tex:5" — this hands them the exact text to anchor an edit on.
+ */
+export function sourceAtLines(
+  tex: string,
+  lineNums: number[],
+  context = 2,
+  maxLines = 40,
+): string {
+  const lines = tex.split(/\r?\n/);
+  const include = new Set<number>();
+  for (const n of lineNums) {
+    const from = Math.max(1, n - context);
+    const to = Math.min(lines.length, n + context);
+    for (let i = from; i <= to; i++) include.add(i);
+  }
+  const ordered = [...include].sort((a, b) => a - b).slice(0, maxLines);
+  const out: string[] = [];
+  let prev = 0;
+  for (const n of ordered) {
+    if (prev && n > prev + 1) out.push("  …");
+    out.push(`${lineNums.includes(n) ? ">" : " "} ${n}: ${lines[n - 1]}`);
+    prev = n;
+  }
+  return out.join("\n");
+}
+
+/**
  * Per-session compile queue. Two Tectonic processes must never run in the same
  * directory at once (they share main.tex/main.pdf), so compiles for a given
  * session are chained; different sessions still compile in parallel.
@@ -154,6 +234,10 @@ async function compileTexNow(dir: string, tex: string): Promise<CompileResult> {
   await mkdir(dir, { recursive: true });
   const mainPath = path.join(dir, "main.tex");
   await writeFile(mainPath, tex, "utf8");
+  // Drop any previous run's log so a crash that dies before writing a new one
+  // can't make us report stale errors below.
+  const logPath = path.join(dir, "main.log");
+  await rm(logPath, { force: true });
 
   const args = [
     "-X",
@@ -190,7 +274,25 @@ async function compileTexNow(dir: string, tex: string): Promise<CompileResult> {
       const hint = diagnoseCrash(log, code, signal, tex);
       const withHint = (body: string) => (hint ? `${hint}\n\n${body}` : body);
       if (code !== 0) {
-        resolve({ ok: false, log: withHint(log || `Tectonic exited with code ${code}`) });
+        // Tectonic's console output names the failing line but not the detail
+        // (which macro, what token) — that lives in main.log (--keep-logs).
+        let details = "";
+        try {
+          details = extractTexLogErrors(await readFile(logPath, "utf8"));
+        } catch {
+          /* engine may have died before writing the log */
+        }
+        // Quote main.tex at the reported lines: models fix "the wrong line"
+        // when they have to count lines in the document themselves.
+        const errLines = errorLineNumbers(log, details);
+        const source = errLines.length
+          ? `\n\nmain.tex source at the reported line(s) — anchor your fix on this EXACT text. ` +
+            `The "> N:"/"  N:" prefixes are line-number annotations, NOT part of the file:\n` +
+            sourceAtLines(tex, errLines)
+          : "";
+        const full =
+          (details ? `${log}\n\nError details from main.log:\n${details}` : log) + source;
+        resolve({ ok: false, log: withHint(full || `Tectonic exited with code ${code}`) });
         return;
       }
       try {

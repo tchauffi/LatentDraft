@@ -89,6 +89,9 @@ export default function App() {
   filesRef.current = files;
   const sessionId = useRef(makeSessionId()).current;
   const compileSeq = useRef(0);
+  // Last completed compile, handed to the agent so a failure log the user is
+  // looking at reaches it with the chat request.
+  const lastCompileRef = useRef<{ ok: boolean; log: string } | null>(null);
 
   const activeText = files[active] ?? "";
   const words = useMemo(() => countWords(activeText), [activeText]);
@@ -111,10 +114,12 @@ export default function App() {
       const result = await compile(sessionId, tex, auxFiles());
       if (seq !== compileSeq.current) return; // superseded by a newer compile
       if (result.ok) {
+        lastCompileRef.current = { ok: true, log: "" };
         setPdf(result.pdf);
         setStatus("ready");
         setLog("");
       } else {
+        lastCompileRef.current = { ok: false, log: result.log };
         setStatus("error");
         setLog(result.log);
       }
@@ -141,6 +146,7 @@ export default function App() {
   }, [runCompile]);
 
   const getDocument = useCallback(() => mainRef.current, []);
+  const getLastCompile = useCallback(() => lastCompileRef.current, []);
 
   const applyEdit = useCallback((edit: ProposedEdit): ApplyResult => {
     const result = applyEditToDoc(mainRef.current, edit);
@@ -213,6 +219,7 @@ export default function App() {
         <ChatPane
           getDocument={getDocument}
           getFiles={auxFiles}
+          getLastCompile={getLastCompile}
           applyEdit={applyEdit}
           onClose={() => setAgentOpen(false)}
           collapsed={!agentOpen}

@@ -36,6 +36,8 @@ interface Props {
   getDocument: () => string;
   /** Auxiliary project files (refs.bib, sections/…) for the agent's compile sandbox. */
   getFiles?: () => Record<string, string>;
+  /** Editor's most recent compile result, so its failure log reaches the agent. */
+  getLastCompile?: () => { ok: boolean; log: string } | null;
   applyEdit: (edit: ProposedEdit) => ApplyResult;
   onClose: () => void;
   collapsed?: boolean;
@@ -59,6 +61,7 @@ function Sparkle({ size = 12, fill = "#fff" }: { size?: number; fill?: string })
 export default function ChatPane({
   getDocument,
   getFiles,
+  getLastCompile,
   applyEdit,
   onClose,
   collapsed,
@@ -139,7 +142,14 @@ export default function ChatPane({
     abortRef.current = abort;
 
     await streamChat(
-      { provider, model, documentText: getDocument(), files: getFiles?.(), messages: history },
+      {
+        provider,
+        model,
+        documentText: getDocument(),
+        files: getFiles?.(),
+        lastCompile: getLastCompile?.() ?? undefined,
+        messages: history,
+      },
       {
         onText: (t) =>
           updateMessage(assistantId, (m) => ({ ...m, content: m.content + t })),
