@@ -1,7 +1,11 @@
+import { useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
 import { latexLight } from "../lib/editorTheme";
+import type { Extension } from "@codemirror/state";
+import { inlineSuggestions, type SuggestionCallbacks } from "../lib/inlineSuggest";
+import type { ProposedEdit } from "../lib/api";
 
 const latex = StreamLanguage.define(stex);
 
@@ -12,6 +16,10 @@ interface Props {
   files: string[];
   active: string;
   onSelect: (file: string) => void;
+  /** Pending agent edits to render inline (Cursor-style accept/reject). */
+  suggestions?: ProposedEdit[];
+  onAcceptSuggestion?: (edit: ProposedEdit) => void;
+  onRejectSuggestion?: (edit: ProposedEdit) => void;
 }
 
 function FileIcon({ active }: { active?: boolean }) {
@@ -23,9 +31,30 @@ function FileIcon({ active }: { active?: boolean }) {
   );
 }
 
-export default function EditorPane({ value, onChange, onCursor, files, active, onSelect }: Props) {
+export default function EditorPane({
+  value,
+  onChange,
+  onCursor,
+  files,
+  active,
+  onSelect,
+  suggestions,
+  onAcceptSuggestion,
+  onRejectSuggestion,
+}: Props) {
   // .tex files get LaTeX highlighting; other buffers (e.g. .bib) render plain.
-  const extensions = active.endsWith(".tex") ? [latex] : [];
+  // The inline-suggestion extension is rebuilt whenever the pending set changes.
+  const extensions = useMemo(() => {
+    const exts: Extension[] = active.endsWith(".tex") ? [latex] : [];
+    if (suggestions && suggestions.length > 0 && onAcceptSuggestion && onRejectSuggestion) {
+      const cb: SuggestionCallbacks = {
+        onAccept: onAcceptSuggestion,
+        onReject: onRejectSuggestion,
+      };
+      exts.push(inlineSuggestions(suggestions, cb));
+    }
+    return exts;
+  }, [active, suggestions, onAcceptSuggestion, onRejectSuggestion]);
 
   return (
     <div className="pane editor-pane">

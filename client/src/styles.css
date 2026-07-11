@@ -731,6 +731,99 @@ body {
   font-family: inherit;
 }
 
+/* ---- Inline agent suggestions (in the editor) ---- */
+.cm-suggest-old {
+  background: var(--red-bg);
+}
+.cm-suggest-card {
+  margin: 5px 10px 5px 40px;
+  border: 1px solid color-mix(in oklch, var(--accent) 40%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  font-family: var(--ui);
+}
+.cm-suggest-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  background: color-mix(in oklch, var(--accent) 9%, #fff);
+  border-bottom: 1px solid color-mix(in oklch, var(--accent) 22%, transparent);
+  font-size: 11px;
+  color: var(--accent-ink);
+}
+.cm-suggest-title {
+  font-weight: 600;
+}
+.cm-suggest-dot {
+  color: color-mix(in oklch, var(--accent) 45%, #fff);
+}
+.cm-suggest-sub {
+  color: color-mix(in oklch, var(--accent-ink) 70%, #fff);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-suggest-diff {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 19px;
+  padding: 5px 0;
+}
+.cm-suggest-row {
+  display: flex;
+  background: var(--green-bg);
+}
+.cm-suggest-sign {
+  flex: none;
+  width: 30px;
+  text-align: center;
+  color: var(--green);
+  user-select: none;
+}
+.cm-suggest-code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding-right: 8px;
+  color: var(--green-ink);
+}
+.cm-suggest-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--panel-2);
+}
+.cm-suggest-actions button {
+  font-family: var(--ui);
+  font-size: 11.5px;
+  cursor: pointer;
+  border-radius: 6px;
+  height: 26px;
+}
+.cm-suggest-accept {
+  border: none;
+  padding: 0 12px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.cm-suggest-accept:hover {
+  background: color-mix(in oklch, var(--accent) 88%, #000);
+}
+.cm-suggest-reject {
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  padding: 0 12px;
+  background: #fff;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.cm-suggest-reject:hover {
+  background: var(--strip);
+}
+
 /* ---- Diff / edit cards ---- */
 .edit-card {
   border: 1px solid rgba(0, 0, 0, 0.12);

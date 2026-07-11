@@ -76,6 +76,11 @@ export default function App() {
   const [agentOpen, setAgentOpen] = useState(true);
   const [pages, setPages] = useState(0);
   const [cursor, setCursor] = useState({ line: 1, col: 1 });
+  // Agent edits awaiting a decision, mirrored inline in the editor.
+  const [pendingEdits, setPendingEdits] = useState<ProposedEdit[]>([]);
+  const editResolverRef = useRef<((editId: string, action: "accept" | "reject") => void) | null>(
+    null,
+  );
 
   // The agent + compiler always operate on main.tex.
   const mainRef = useRef(files[MAIN]);
@@ -147,6 +152,17 @@ export default function App() {
     return result;
   }, []);
 
+  // Inline suggestion buttons resolve through the chat pane, so the diff
+  // card there flips to applied/rejected in the same motion.
+  const acceptSuggestion = useCallback(
+    (edit: ProposedEdit) => editResolverRef.current?.(edit.id, "accept"),
+    [],
+  );
+  const rejectSuggestion = useCallback(
+    (edit: ProposedEdit) => editResolverRef.current?.(edit.id, "reject"),
+    [],
+  );
+
   const downloadPdf = useCallback(() => {
     if (!pdf) return;
     const blob = new Blob([pdf], { type: "application/pdf" });
@@ -181,6 +197,9 @@ export default function App() {
                 files={FILE_ORDER}
                 active={active}
                 onSelect={setActive}
+                suggestions={active === MAIN ? pendingEdits : undefined}
+                onAcceptSuggestion={acceptSuggestion}
+                onRejectSuggestion={rejectSuggestion}
               />
             </Panel>
             <PanelResizeHandle className="resize-handle" />
@@ -197,6 +216,8 @@ export default function App() {
           applyEdit={applyEdit}
           onClose={() => setAgentOpen(false)}
           collapsed={!agentOpen}
+          onPendingEditsChange={setPendingEdits}
+          resolverRef={editResolverRef}
         />
 
         {!agentOpen && (

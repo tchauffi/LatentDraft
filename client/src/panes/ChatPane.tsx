@@ -39,6 +39,10 @@ interface Props {
   applyEdit: (edit: ProposedEdit) => ApplyResult;
   onClose: () => void;
   collapsed?: boolean;
+  /** Notified whenever the set of pending (undecided) edits changes — drives the inline editor suggestions. */
+  onPendingEditsChange?: (edits: ProposedEdit[]) => void;
+  /** Receives a resolver so other panes (inline suggestions) can accept/reject an edit by id. */
+  resolverRef?: React.MutableRefObject<((editId: string, action: "accept" | "reject") => void) | null>;
 }
 
 let idSeq = 0;
@@ -52,7 +56,15 @@ function Sparkle({ size = 12, fill = "#fff" }: { size?: number; fill?: string })
   );
 }
 
-export default function ChatPane({ getDocument, getFiles, applyEdit, onClose, collapsed }: Props) {
+export default function ChatPane({
+  getDocument,
+  getFiles,
+  applyEdit,
+  onClose,
+  collapsed,
+  onPendingEditsChange,
+  resolverRef,
+}: Props) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [provider, setProvider] = useState<string>("");
   const [model, setModel] = useState<string>("");
@@ -89,6 +101,13 @@ export default function ChatPane({ getDocument, getFiles, applyEdit, onClose, co
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
+
+  // Surface the pending edits to the editor pane (inline suggestions).
+  useEffect(() => {
+    onPendingEditsChange?.(
+      messages.flatMap((m) => m.edits.filter((e) => e.status === "pending")),
+    );
+  }, [messages, onPendingEditsChange]);
 
   function updateMessage(id: string, fn: (m: UIMessage) => UIMessage) {
     setMessages((prev) => prev.map((m) => (m.id === id ? fn(m) : m)));
@@ -127,7 +146,9 @@ export default function ChatPane({ getDocument, getFiles, applyEdit, onClose, co
         onEdit: (edit) =>
           updateMessage(assistantId, (m) => ({
             ...m,
-            edits: [...m.edits, { ...edit, status: "pending" }],
+            // Server edit ids restart at edit-1 every turn; prefix with the
+            // message id so ids stay unique across the whole conversation.
+            edits: [...m.edits, { ...edit, id: `${assistantId}:${edit.id}`, status: "pending" }],
           })),
         onCheck: (check) => updateMessage(assistantId, (m) => ({ ...m, check })),
         onTool: (tool) =>
@@ -205,6 +226,24 @@ export default function ChatPane({ getDocument, getFiles, applyEdit, onClose, co
       edits: m.edits.map((e) => (e.id === editId ? { ...e, status: "rejected" } : e)),
     }));
   }
+
+  // Let the editor pane's inline suggestion cards resolve an edit by id;
+  // the chat card's status updates through the same path.
+  useEffect(() => {
+    if (!resolverRef) return;
+    resolverRef.current = (editId, action) => {
+      for (const m of messages) {
+        const edit = m.edits.find((e) => e.id === editId && e.status === "pending");
+        if (!edit) continue;
+        if (action === "accept") onAccept(m.id, edit);
+        else onReject(m.id, edit.id);
+        return;
+      }
+    };
+    return () => {
+      resolverRef.current = null;
+    };
+  });
 
   function onAcceptAll(msg: UIMessage) {
     // Apply pending edits in order; applyEdit mutates the doc synchronously so
