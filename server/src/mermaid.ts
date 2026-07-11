@@ -36,11 +36,19 @@ export async function renderMermaid(
   code: string,
   filename?: string,
 ): Promise<MermaidResult> {
+  return renderMermaidIn(sessionDir(sessionId), code, filename);
+}
+
+/** Same, but in an explicit working directory (a project dir). */
+export async function renderMermaidIn(
+  dir: string,
+  code: string,
+  filename?: string,
+): Promise<MermaidResult> {
   const file = safePngName(filename);
   if (!file) {
     return { ok: false, output: `Bad filename — use a simple name like "diagram.png".` };
   }
-  const dir = sessionDir(sessionId);
   await mkdir(dir, { recursive: true });
   // The model often wraps the source in ```mermaid fences — strip them.
   const source = code.replace(/^\s*```(?:mermaid)?\s*\n?/, "").replace(/\n?```\s*$/, "");

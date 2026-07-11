@@ -36,8 +36,11 @@ interface UIMessage {
 }
 
 interface Props {
-  /** The editor's compile session — shared with the agent so files it
-   * generates (figures) resolve when the preview recompiles. */
+  /** The project the agent works on (multi-file mode). */
+  projectId?: string | null;
+  /** Flush dirty buffers to disk before a turn — the agent reads from disk. */
+  onBeforeSend?: () => Promise<void>;
+  /** The editor's compile session — legacy fallback when no project is open. */
   sessionId?: string;
   getDocument: () => string;
   /** Auxiliary project files (refs.bib, sections/…) for the agent's compile sandbox. */
@@ -51,6 +54,12 @@ interface Props {
   onPendingEditsChange?: (edits: ProposedEdit[]) => void;
   /** Receives a resolver so other panes (inline suggestions) can accept/reject an edit by id. */
   resolverRef?: React.MutableRefObject<((editId: string, action: "accept" | "reject") => void) | null>;
+  /** Exposes send/autoFix/streaming so the app can trigger agent turns (auto-fix). */
+  controlRef?: React.MutableRefObject<{
+    send: (text: string) => void;
+    autoFix: boolean;
+    streaming: boolean;
+  } | null>;
   /** Called when an agent turn finishes (files may have been generated server-side). */
   onTurnEnd?: () => void;
   /** Server-side generated files — part of the agent's context, shown in the composer chips. */
@@ -69,6 +78,8 @@ function Sparkle({ size = 12, fill = "#fff" }: { size?: number; fill?: string })
 }
 
 export default function ChatPane({
+  projectId,
+  onBeforeSend,
   sessionId,
   getDocument,
   getFiles,
@@ -78,9 +89,11 @@ export default function ChatPane({
   collapsed,
   onPendingEditsChange,
   resolverRef,
+  controlRef,
   onTurnEnd,
   generatedFiles,
 }: Props) {
+  const [autoFix, setAutoFix] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [provider, setProvider] = useState<string>("");
   const [model, setModel] = useState<string>("");
@@ -153,8 +166,8 @@ export default function ChatPane({
     setMessages((prev) => prev.map((m) => (m.id === id ? fn(m) : m)));
   }
 
-  async function send() {
-    const text = input.trim();
+  async function send(textOverride?: string) {
+    const text = (textOverride ?? input).trim();
     if (!text || streaming || !provider || !model) return;
     setInput("");
 
@@ -178,10 +191,14 @@ export default function ChatPane({
     const abort = new AbortController();
     abortRef.current = abort;
 
+    // The agent reads project files from DISK — flush unsaved buffers first.
+    await onBeforeSend?.();
+
     await streamChat(
       {
         provider,
         model,
+        projectId: projectId ?? undefined,
         sessionId,
         documentText: getDocument(),
         files: getFiles?.(),
@@ -256,6 +273,15 @@ export default function ChatPane({
   function stop() {
     abortRef.current?.abort();
   }
+
+  // Let the app trigger a turn (error-banner "Fix with AI", auto-fix loop).
+  useEffect(() => {
+    if (!controlRef) return;
+    controlRef.current = { send: (text) => void send(text), autoFix, streaming };
+    return () => {
+      controlRef.current = null;
+    };
+  });
 
   function onAccept(msgId: string, edit: EditCard) {
     const result = applyEdit(edit);
@@ -334,6 +360,17 @@ export default function ChatPane({
           </select>
         </div>
         <div className="toolbar-spacer" />
+        <label
+          className={`autofix-toggle${autoFix ? " autofix-on" : ""}`}
+          title="When a compile fails, automatically ask the agent to fix it"
+        >
+          <input
+            type="checkbox"
+            checked={autoFix}
+            onChange={(e) => setAutoFix(e.target.checked)}
+          />
+          auto-fix
+        </label>
         <button
           className="agent-icon-btn"
           title="New chat"
@@ -479,7 +516,7 @@ export default function ChatPane({
             ) : (
               <button
                 className="composer-send"
-                onClick={send}
+                onClick={() => void send()}
                 disabled={!input.trim() || !model}
                 title="Send"
               >
@@ -552,7 +589,7 @@ function EditCardView({
           <path d="M3 1.5h5l3 3v8H3z" />
           <path d="M8 1.5v3h3" />
         </svg>
-        <span className="mono">main.tex</span>
+        <span className="mono">{edit.file ?? "main.tex"}</span>
         <div className="toolbar-spacer" />
         {oldLines.length > 0 && <span className="diff-plus mono">+{newLines.length}</span>}
         {oldLines.length > 0 && <span className="diff-minus mono">−{oldLines.length}</span>}

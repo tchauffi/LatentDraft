@@ -1,9 +1,14 @@
 import type { PreviewStatus } from "../panes/PreviewPane";
+import type { ProjectInfo } from "../lib/api";
 
 interface Props {
   fileName: string;
   status: PreviewStatus;
   agentOpen: boolean;
+  projects: ProjectInfo[];
+  currentProject: string | null;
+  onSwitchProject: (id: string) => void;
+  onNewProject: () => void;
   onRecompile: () => void;
   onToggleAgent: () => void;
   onDownload: () => void;
@@ -14,6 +19,10 @@ export default function TopToolbar({
   fileName,
   status,
   agentOpen,
+  projects,
+  currentProject,
+  onSwitchProject,
+  onNewProject,
   onRecompile,
   onToggleAgent,
   onDownload,
@@ -34,7 +43,22 @@ export default function TopToolbar({
       <div className="toolbar-sep" />
 
       <div className="breadcrumb">
-        <span>LatentDraft</span>
+        <select
+          className="project-switcher"
+          value={currentProject ?? ""}
+          onChange={(e) => onSwitchProject(e.target.value)}
+          title="Switch project"
+        >
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.id}
+            </option>
+          ))}
+          {projects.length === 0 && <option value="">no projects</option>}
+        </select>
+        <button className="btn-icon project-new" title="New project" onClick={onNewProject}>
+          ＋
+        </button>
         <span className="crumb-slash">/</span>
         <span className="crumb-file">{fileName}</span>
         <span

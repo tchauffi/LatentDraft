@@ -23,6 +23,16 @@ export interface CompileResult {
   pdf?: Buffer;
   /** Combined stdout+stderr from Tectonic (the build log). */
   log: string;
+  /** Structured per-line errors, for editor squiggles. Present on failure. */
+  diagnostics?: CompileDiagnostic[];
+}
+
+export interface CompileDiagnostic {
+  /** Path relative to the compile dir, e.g. "main.tex", "sections/intro.tex". */
+  file: string;
+  line: number;
+  message: string;
+  severity: "error" | "warning";
 }
 
 /** A sessionId is used as the working-directory name; sanitize to avoid traversal. */
@@ -45,7 +55,7 @@ export function sessionDir(sessionId: string): string {
  * Rejects absolute paths, traversal, and unusual characters. Returns the
  * normalized relative path, or undefined if it is not safe to write.
  */
-function safeRelPath(name: string): string | undefined {
+export function safeRelPath(name: string): string | undefined {
   if (!/^[a-zA-Z0-9._/-]{1,128}$/.test(name)) return undefined;
   const norm = path.posix.normalize(name);
   if (norm.startsWith("/") || norm.startsWith("..") || norm.includes("/../")) return undefined;
@@ -74,7 +84,7 @@ export async function writeSessionFiles(
 /** Build artifacts, view_pdf previews, and underscore-prefixed scratch files
  * (run_python's _agent_script.py, mermaid's _diagram.mmd/_puppeteer.json) —
  * not project files. */
-const NON_PROJECT_FILE = /^main\.(tex|pdf|log|aux|out|toc|bbl|blg)$|^preview-\d+\.png$|^_/;
+const NON_PROJECT_FILE = /^main\.(tex|pdf|log|aux|out|toc|bbl|blg|synctex\.gz)$|^preview-\d+\.png$|^_/;
 
 /**
  * Project files present in a session's compile dir (aux files from earlier
@@ -100,41 +110,6 @@ export async function listSessionFiles(sessionId: string): Promise<string[]> {
     }
   }
   return files.sort();
-}
-
-/** File types a user may upload into the session (data files, images, bibs). */
-const UPLOAD_EXT = /\.(csv|tsv|xlsx|xls|json|txt|dat|png|jpe?g|svg|pdf|bib)$/i;
-
-/**
- * Write one user-uploaded file (binary-safe) into a session's compile dir so
- * run_python can read it (pandas) and \includegraphics/\input can resolve it.
- * Returns the normalized relative path, or undefined when the name is unsafe,
- * the extension is not allowed, or it would clobber main.tex.
- */
-export async function writeSessionUpload(
-  sessionId: string,
-  name: string,
-  data: Buffer,
-): Promise<string | undefined> {
-  const rel = safeRelPath(name);
-  if (!rel || rel === "main.tex" || !UPLOAD_EXT.test(rel) || NON_PROJECT_FILE.test(rel)) {
-    return undefined;
-  }
-  const target = path.join(safeSessionDir(sessionId), rel);
-  await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(target, data);
-  return rel;
-}
-
-/**
- * Absolute path of a project file inside a session dir, for serving it to the
- * client (file-tree preview). Undefined when the name is unsafe (traversal)
- * or not a project file (build artifacts, run_python's scratch script).
- */
-export function sessionFilePath(sessionId: string, name: string): string | undefined {
-  const rel = safeRelPath(name);
-  if (!rel || NON_PROJECT_FILE.test(rel)) return undefined;
-  return path.join(safeSessionDir(sessionId), rel);
 }
 
 /** Delete session dirs that have not been touched in SESSION_MAX_AGE_MS. */
@@ -411,6 +386,62 @@ export function diagnoseUnbalanced(
 }
 
 /**
+ * Structured per-line errors for editor squiggles, from the console output
+ * ("error: <file>:<line>: <msg>" — keeps the FILENAME, unlike errorLineNumbers'
+ * main.tex-only filter), the .log's "!" blocks (attributed to main.tex only
+ * when no console error names another file), and unclosed-environment scan
+ * results for no-line-number failures.
+ */
+export function structuredDiagnostics(
+  consoleLog: string,
+  logDetails: string,
+  tex?: string,
+): CompileDiagnostic[] {
+  const out: CompileDiagnostic[] = [];
+  const seen = new Set<string>();
+  const push = (d: CompileDiagnostic) => {
+    const key = `${d.file}:${d.line}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(d);
+    }
+  };
+
+  for (const m of consoleLog.matchAll(/^error: ([^\s:]+):(\d+): ?(.*)$/gm)) {
+    push({
+      file: m[1].replace(/^\.\//, ""),
+      line: Number(m[2]),
+      message: m[3].trim() || "LaTeX error",
+      severity: "error",
+    });
+  }
+
+  // Bare "l.N" context refers to whatever file TeX was reading — only trust it
+  // as main.tex when no console error names a different file.
+  const namedOther = out.some((d) => !/(^|\/)main\.tex$/.test(d.file));
+  if (!namedOther) {
+    for (const block of logDetails.split(/\n{2,}/)) {
+      const msg = block.match(/^! ?(.+)$/m)?.[1]?.trim();
+      const line = block.match(/^l\.(\d+)/m)?.[1];
+      if (msg && line) push({ file: "main.tex", line: Number(line), message: msg, severity: "error" });
+    }
+  }
+
+  if (
+    tex &&
+    /File ended while scanning|Runaway argument|\\end occurred inside a group/i.test(
+      consoleLog + "\n" + logDetails,
+    )
+  ) {
+    for (const issue of findEnvironmentIssues(tex).slice(0, 5)) {
+      push({ file: "main.tex", line: issue.line, message: issue.description, severity: "error" });
+    }
+  }
+
+  return out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+}
+
+/**
  * Per-session compile queue. Two Tectonic processes must never run in the same
  * directory at once (they share main.tex/main.pdf), so compiles for a given
  * session are chained; different sessions still compile in parallel.
@@ -430,24 +461,56 @@ function enqueue<T>(key: string, job: () => Promise<T>): Promise<T> {
 
 export async function compileTex(sessionId: string, tex: string): Promise<CompileResult> {
   const dir = safeSessionDir(sessionId);
-  return enqueue(dir, () => compileTexNow(dir, tex));
+  return enqueue(dir, async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "main.tex"), tex, "utf8");
+    return runTectonic(dir, dir, tex);
+  });
 }
 
-async function compileTexNow(dir: string, tex: string): Promise<CompileResult> {
-  await mkdir(dir, { recursive: true });
-  const mainPath = path.join(dir, "main.tex");
-  await writeFile(mainPath, tex, "utf8");
+/** Build artifacts of a project live here, out of the user's (git) way. */
+export function projectBuildDir(projectDir: string): string {
+  return path.join(projectDir, ".latentdraft", "build");
+}
+
+/**
+ * Compile a PROJECT directory from disk: sources stay untouched where the
+ * user (and git) keep them, and all artifacts (main.pdf, main.log) land in
+ * `.latentdraft/build`. Tectonic resolves \input/\includegraphics/.bib
+ * relative to main.tex in the project dir.
+ */
+export async function compileProject(projectDir: string): Promise<CompileResult> {
+  return enqueue(projectDir, async () => {
+    let tex: string;
+    try {
+      tex = await readFile(path.join(projectDir, "main.tex"), "utf8");
+    } catch {
+      return { ok: false, log: "This project has no main.tex — create one to compile." };
+    }
+    const outDir = projectBuildDir(projectDir);
+    await mkdir(outDir, { recursive: true });
+    return runTectonic(projectDir, outDir, tex);
+  });
+}
+
+/**
+ * Run Tectonic on `dir`/main.tex with artifacts in `outDir` (same dir for
+ * legacy sessions, `.latentdraft/build` for projects). `tex` is main.tex's
+ * content, used only to enrich failure logs (source quoting, env scan).
+ */
+async function runTectonic(dir: string, outDir: string, tex: string): Promise<CompileResult> {
   // Drop any previous run's log so a crash that dies before writing a new one
   // can't make us report stale errors below.
-  const logPath = path.join(dir, "main.log");
+  const logPath = path.join(outDir, "main.log");
   await rm(logPath, { force: true });
 
   const args = [
     "-X",
     "compile",
     "--outdir",
-    dir,
+    outDir,
     "--keep-logs",
+    "--synctex", // main.synctex.gz next to the PDF, for editor↔preview jumps
     "main.tex",
   ];
 
@@ -500,11 +563,15 @@ async function compileTexNow(dir: string, tex: string): Promise<CompileResult> {
           (details ? `${log}\n\nError details from main.log:\n${details}` : log) +
           source +
           (unbalanced ? `\n\n${unbalanced}` : "");
-        resolve({ ok: false, log: withHint(full || `Tectonic exited with code ${code}`) });
+        resolve({
+          ok: false,
+          log: withHint(full || `Tectonic exited with code ${code}`),
+          diagnostics: structuredDiagnostics(log, details, tex),
+        });
         return;
       }
       try {
-        const pdf = await readFile(path.join(dir, "main.pdf"));
+        const pdf = await readFile(path.join(outDir, "main.pdf"));
         resolve({ ok: true, pdf, log });
       } catch (err) {
         resolve({

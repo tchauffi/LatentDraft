@@ -6,7 +6,6 @@ import { writeFile } from "node:fs/promises";
 import {
   compileTex,
   writeSessionFiles,
-  writeSessionUpload,
   sessionDir,
   listSessionFiles,
   extractTexLogErrors,
@@ -14,6 +13,7 @@ import {
   sourceAtLines,
   findEnvironmentIssues,
   diagnoseUnbalanced,
+  structuredDiagnostics,
 } from "../src/compile.js";
 
 // Integration tests: they run the real vendored Tectonic binary. The package
@@ -162,17 +162,6 @@ test("listSessionFiles reports project files but not build artifacts", async () 
   assert.deepEqual(await listSessionFiles(id), ["refs.bib", "sections/intro.tex", "sine_wave.png"]);
 });
 
-test("writeSessionUpload accepts data files and rejects unsafe or unknown ones", async () => {
-  const id = session("upload");
-  assert.equal(await writeSessionUpload(id, "data.csv", Buffer.from("a,b\n1,2\n")), "data.csv");
-  assert.equal(await writeSessionUpload(id, "report.xlsx", Buffer.from([0x50, 0x4b])), "report.xlsx");
-  assert.equal(await writeSessionUpload(id, "../escape.csv", Buffer.from("x")), undefined);
-  assert.equal(await writeSessionUpload(id, "main.tex", Buffer.from("x")), undefined);
-  assert.equal(await writeSessionUpload(id, "script.sh", Buffer.from("x")), undefined);
-  assert.equal(await writeSessionUpload(id, "_agent_script.py", Buffer.from("x")), undefined);
-  assert.deepEqual(await listSessionFiles(id), ["data.csv", "report.xlsx"]);
-});
-
 test("listSessionFiles returns empty for a session that never compiled", async () => {
   assert.deepEqual(await listSessionFiles(`${RUN}-never-existed`), []);
 });
@@ -289,6 +278,40 @@ test("a beamer deck missing an \\end{frame} gets the unclosed-frame diagnosis in
   assert.equal(result.ok, false);
   assert.match(result.log, /opened at line 8 is never closed/);
   assert.match(result.log, /> 8: \\begin\{frame\}\{Two — unclosed\}/);
+});
+
+test("structuredDiagnostics keeps filenames from console errors", () => {
+  const consoleLog =
+    "error: main.tex:5: Undefined control sequence\n" +
+    "error: sections/intro.tex:3: Missing $ inserted\n";
+  const diag = structuredDiagnostics(consoleLog, "");
+  assert.deepEqual(
+    diag.map((d) => [d.file, d.line]),
+    [["main.tex", 5], ["sections/intro.tex", 3]],
+  );
+  assert.equal(diag[0].message, "Undefined control sequence");
+  assert.equal(diag[0].severity, "error");
+});
+
+test("structuredDiagnostics attributes l.N blocks to main.tex only when safe", () => {
+  const details = "! Undefined control sequence.\n<recently read> \\badmacro\nl.5 \\badmacro\n";
+  // No console error naming another file → trust l.5 as main.tex.
+  assert.deepEqual(
+    structuredDiagnostics("", details).map((d) => [d.file, d.line, d.message]),
+    [["main.tex", 5, "Undefined control sequence."]],
+  );
+  // A console error in another file → the bare l.N is ambiguous, drop it.
+  const other = "error: refs.bib:2: something\n";
+  assert.deepEqual(
+    structuredDiagnostics(other, details).map((d) => d.file),
+    ["refs.bib"],
+  );
+});
+
+test("structuredDiagnostics surfaces unclosed environments for no-line-number errors", () => {
+  const consoleLog = "error: !File ended while scanning use of \\beamer@collect@@body\n";
+  const diag = structuredDiagnostics(consoleLog, "", UNCLOSED_FRAME_TEX);
+  assert.ok(diag.some((d) => d.line === 8 && /never closed/.test(d.message)), JSON.stringify(diag));
 });
 
 test("concurrent compiles of one session serialize and each returns its own PDF", async () => {

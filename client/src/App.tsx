@@ -6,59 +6,26 @@ import ChatPane from "./panes/ChatPane";
 import TopToolbar from "./components/TopToolbar";
 import StatusBar from "./components/StatusBar";
 import {
-  compile,
-  fetchSessionFiles,
-  sessionFileUrl,
-  uploadSessionFile,
+  fetchProjects,
+  createProjectApi,
+  fetchProjectFiles,
+  fetchProjectFileText,
+  saveProjectFile,
+  renameProjectFileApi,
+  deleteProjectFileApi,
+  compileProjectApi,
+  projectFileUrl,
+  synctexForward,
+  synctexReverse,
+  type CompileDiagnostic,
+  type ProjectInfo,
   type ProposedEdit,
 } from "./lib/api";
 import { applyEdit as applyEditToDoc, type ApplyResult } from "./lib/diff";
 
 const MAIN = "main.tex";
-
-const SAMPLE = `\\documentclass{article}
-\\usepackage{amsmath}
-\\title{Untitled}
-\\author{}
-\\date{\\today}
-
-\\begin{document}
-\\maketitle
-
-\\section{Introduction}
-Welcome to LatentDraft. Edit this LaTeX on the left; the PDF compiles in the
-middle; ask the assistant on the right to propose changes.
-
-The quadratic formula is
-\\begin{equation}
-  x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}.
-\\end{equation}
-
-\\end{document}
-`;
-
-const BIB = `@article{shannon1948,
-  author  = {Shannon, C. E.},
-  title   = {A Mathematical Theory of Communication},
-  journal = {Bell System Technical Journal},
-  year    = {1948},
-}
-`;
-
-const INTRO = `% Draft the introduction here, then \\input{sections/intro} from main.tex.
-\\section{Introduction}
-Turbulence remains a central open problem in classical physics.
-`;
-
-const INITIAL_FILES: Record<string, string> = {
-  [MAIN]: SAMPLE,
-  "refs.bib": BIB,
-  "sections/intro.tex": INTRO,
-};
-
-const FILE_ORDER = [MAIN, "refs.bib", "sections/intro.tex"];
-
 const DEBOUNCE_MS = 800;
+const PROJECT_KEY = "latentdraft:project";
 
 function makeSessionId(): string {
   return `s-${Math.random().toString(36).slice(2, 10)}`;
@@ -74,7 +41,14 @@ function countWords(tex: string): number {
 }
 
 export default function App() {
-  const [files, setFiles] = useState<Record<string, string>>(INITIAL_FILES);
+  // ---- Project state: the server's project DIRECTORY is the source of truth;
+  // `files` holds the text buffers, saved back via debounced autosave. ----
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [templates, setTemplates] = useState<string[]>([]);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [files, setFiles] = useState<Record<string, string>>({});
+  const [binaryFiles, setBinaryFiles] = useState<string[]>([]);
+
   const [active, setActive] = useState<string>(MAIN);
   // Tabs are OPEN buffers, not a mirror of the project: the tree opens them,
   // × closes them. main.tex is pinned open (it's the compiled document).
@@ -82,22 +56,32 @@ export default function App() {
   const [pdf, setPdf] = useState<ArrayBuffer | null>(null);
   const [status, setStatus] = useState<PreviewStatus>("idle");
   const [log, setLog] = useState("");
+  const [diagnostics, setDiagnostics] = useState<CompileDiagnostic[]>([]);
+  // SyncTeX: editor→PDF target and PDF→editor jump.
+  const [syncTarget, setSyncTarget] = useState<{ page: number; x: number; y: number; stamp: number } | null>(null);
+  const [jumpTo, setJumpTo] = useState<{ file: string; line: number; stamp: number } | undefined>();
   const [agentOpen, setAgentOpen] = useState(true);
   const [pages, setPages] = useState(0);
   const [cursor, setCursor] = useState({ line: 1, col: 1 });
   // Agent edits awaiting a decision, mirrored inline in the editor.
   const [pendingEdits, setPendingEdits] = useState<ProposedEdit[]>([]);
-  // Server-side files in the compile session (aux + agent-generated figures).
-  const [sessionFiles, setSessionFiles] = useState<string[]>([]);
   const editResolverRef = useRef<((editId: string, action: "accept" | "reject") => void) | null>(
     null,
   );
 
-  // The agent + compiler always operate on main.tex.
-  const mainRef = useRef(files[MAIN]);
-  mainRef.current = files[MAIN];
+  const mainRef = useRef("");
+  mainRef.current = files[MAIN] ?? "";
   const filesRef = useRef(files);
   filesRef.current = files;
+  const binaryRef = useRef(binaryFiles);
+  binaryRef.current = binaryFiles;
+  const projectRef = useRef<string | null>(null);
+  /** Disk mtime each buffer was loaded from — the autosave conflict guard. */
+  const mtimes = useRef<Record<string, number>>({});
+  /** Buffers edited since their last successful save. */
+  const dirty = useRef<Set<string>>(new Set());
+
+  // The agent's compile sandbox session (replaced by the project itself in M3).
   const sessionId = useRef(makeSessionId()).current;
   const compileSeq = useRef(0);
   // Last completed compile, handed to the agent so a failure log the user is
@@ -108,9 +92,223 @@ export default function App() {
   const words = useMemo(() => countWords(activeText), [activeText]);
 
   const setActiveText = useCallback(
-    (value: string) => setFiles((f) => ({ ...f, [active]: value })),
+    (value: string) => {
+      dirty.current.add(active);
+      setFiles((f) => ({ ...f, [active]: value }));
+    },
     [active],
   );
+
+  /**
+   * Push every dirty buffer to disk. A 409 means the file changed on disk
+   * (git, another editor) since we loaded it — ask which side wins.
+   */
+  const saveDirty = useCallback(async (): Promise<void> => {
+    const id = projectRef.current;
+    if (!id) return;
+    for (const path of [...dirty.current]) {
+      const content = filesRef.current[path];
+      if (content === undefined) {
+        dirty.current.delete(path);
+        continue;
+      }
+      const result = await saveProjectFile(id, path, content, mtimes.current[path]);
+      if (result.ok) {
+        mtimes.current[path] = result.mtimeMs;
+        dirty.current.delete(path);
+      } else if ("conflict" in result) {
+        const useDisk = window.confirm(
+          `${path} changed on disk since you loaded it (git? another editor?).\n\n` +
+            `OK — reload the disk version (discards your unsaved change to this file)\n` +
+            `Cancel — keep your version and overwrite the disk`,
+        );
+        if (useDisk) {
+          mtimes.current[path] = result.conflict.mtimeMs;
+          dirty.current.delete(path);
+          setFiles((f) => ({ ...f, [path]: result.conflict.content }));
+        } else {
+          const forced = await saveProjectFile(id, path, content);
+          if (forced.ok) {
+            mtimes.current[path] = forced.mtimeMs;
+            dirty.current.delete(path);
+          }
+        }
+      } else {
+        console.warn(`[latentdraft] save failed for ${path}: ${result.error}`);
+      }
+    }
+  }, []);
+
+  /** Save dirty buffers, then compile the project from disk. */
+  const runCompile = useCallback(async () => {
+    const id = projectRef.current;
+    if (!id) return;
+    const seq = ++compileSeq.current;
+    setStatus("compiling");
+    await saveDirty();
+    const result = await compileProjectApi(id);
+    if (seq !== compileSeq.current) return; // superseded by a newer compile
+    if (result.ok) {
+      lastCompileRef.current = { ok: true, log: "" };
+      setPdf(result.pdf);
+      setStatus("ready");
+      setLog("");
+      setDiagnostics([]);
+    } else {
+      lastCompileRef.current = { ok: false, log: result.log };
+      setStatus("error");
+      setLog(result.log);
+      setDiagnostics(result.diagnostics ?? []);
+    }
+  }, [saveDirty]);
+
+  /**
+   * Re-sync with the project directory: pick up files created/changed outside
+   * the editor (git checkout, agent-generated figures). Dirty buffers win.
+   */
+  const refreshProjectFiles = useCallback(async () => {
+    const id = projectRef.current;
+    if (!id) return;
+    let list;
+    try {
+      list = await fetchProjectFiles(id);
+    } catch {
+      return;
+    }
+    setBinaryFiles(list.filter((f) => f.binary).map((f) => f.path));
+    const texts = list.filter((f) => !f.binary);
+    const updates: Record<string, string> = {};
+    await Promise.all(
+      texts.map(async (f) => {
+        const known = mtimes.current[f.path];
+        if (known !== undefined && f.mtimeMs <= known) return; // unchanged
+        if (dirty.current.has(f.path)) return; // never clobber local edits
+        const r = await fetchProjectFileText(id, f.path);
+        if (r) {
+          updates[f.path] = r.content;
+          mtimes.current[f.path] = r.mtimeMs;
+        }
+      }),
+    );
+    if (Object.keys(updates).length > 0) setFiles((f) => ({ ...f, ...updates }));
+  }, []);
+
+  /** Load a project's files into fresh buffers and make it current. */
+  const loadProject = useCallback(async (id: string) => {
+    const list = await fetchProjectFiles(id);
+    const texts: Record<string, string> = {};
+    const mt: Record<string, number> = {};
+    await Promise.all(
+      list
+        .filter((f) => !f.binary)
+        .map(async (f) => {
+          const r = await fetchProjectFileText(id, f.path);
+          if (r) {
+            texts[f.path] = r.content;
+            mt[f.path] = r.mtimeMs;
+          }
+        }),
+    );
+    mtimes.current = mt;
+    dirty.current = new Set();
+    projectRef.current = id;
+    lastCompileRef.current = null;
+    setProjectId(id);
+    setBinaryFiles(list.filter((f) => f.binary).map((f) => f.path));
+    setFiles(texts); // triggers the debounced initial compile
+    setOpenTabs([MAIN]);
+    setActive(MAIN);
+    setPdf(null);
+    setPendingEdits([]);
+    localStorage.setItem(PROJECT_KEY, id);
+  }, []);
+
+  const switchProject = useCallback(
+    async (id: string) => {
+      if (id === projectRef.current) return;
+      await saveDirty(); // never lose edits on switch
+      await loadProject(id);
+    },
+    [saveDirty, loadProject],
+  );
+
+  const newProject = useCallback(async () => {
+    const name = window.prompt("New project name:")?.trim();
+    if (!name) return;
+    let template: string | undefined;
+    if (templates.length > 1) {
+      const pick = window
+        .prompt(`Template — one of: ${templates.join(", ")}`, templates[0])
+        ?.trim()
+        .toLowerCase();
+      if (!pick) return;
+      if (!templates.includes(pick)) {
+        window.alert(`Unknown template '${pick}'. Available: ${templates.join(", ")}.`);
+        return;
+      }
+      template = pick;
+    }
+    const r = await createProjectApi(name, template);
+    if ("error" in r) {
+      window.alert(r.error);
+      return;
+    }
+    setProjects((await fetchProjects()).projects);
+    await switchProject(r.id);
+  }, [switchProject, templates]);
+
+  // Bootstrap: list projects, create a starter one on first run, open the
+  // last-used (or most recent) project. This is what makes work survive reload.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const initial = await fetchProjects();
+        setTemplates(initial.templates);
+        let list = initial.projects;
+        if (list.length === 0) {
+          const r = await createProjectApi("welcome");
+          if ("id" in r) list = (await fetchProjects()).projects;
+        }
+        setProjects(list);
+        const stored = localStorage.getItem(PROJECT_KEY);
+        const pick = list.find((p) => p.id === stored)?.id ?? list[0]?.id;
+        if (pick) await loadProject(pick);
+      } catch (err) {
+        setStatus("error");
+        setLog(`Could not reach the LatentDraft server: ${String(err)}`);
+      }
+    })();
+  }, [loadProject]);
+
+  // Debounced save+compile whenever any buffer changes (also fires once after
+  // a project loads, producing the initial preview).
+  useEffect(() => {
+    if (!projectId) return;
+    const t = setTimeout(() => void runCompile(), DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [files, projectId, runCompile]);
+
+  // Cmd/Ctrl+Enter forces an immediate save+recompile.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        void runCompile();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [runCompile]);
+
+  // Catch external edits (git pull, another editor) when the window regains focus.
+  useEffect(() => {
+    const onFocus = () => void refreshProjectFiles();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshProjectFiles]);
+
+  const getDocument = useCallback(() => mainRef.current, []);
+  const getLastCompile = useCallback(() => lastCompileRef.current, []);
 
   /** Everything except main.tex — sent alongside so \input/\bibliography resolve. */
   const auxFiles = useCallback(() => {
@@ -118,69 +316,49 @@ export default function App() {
     return rest;
   }, []);
 
-  const refreshSessionFiles = useCallback(async () => {
-    setSessionFiles(await fetchSessionFiles(sessionId));
-  }, [sessionId]);
+  // The agent works on the project directly (figures land in the project dir);
+  // after a turn, re-sync the tree to pick them up.
+  const chatControlRef = useRef<{
+    send: (text: string) => void;
+    autoFix: boolean;
+    streaming: boolean;
+  } | null>(null);
+  const lastAutoFixedLog = useRef("");
 
-  const runCompile = useCallback(
-    async (tex: string) => {
-      const seq = ++compileSeq.current;
-      setStatus("compiling");
-      const result = await compile(sessionId, tex, auxFiles());
-      void refreshSessionFiles();
-      if (seq !== compileSeq.current) return; // superseded by a newer compile
-      if (result.ok) {
-        lastCompileRef.current = { ok: true, log: "" };
-        setPdf(result.pdf);
-        setStatus("ready");
-        setLog("");
-      } else {
-        lastCompileRef.current = { ok: false, log: result.log };
-        setStatus("error");
-        setLog(result.log);
-      }
-    },
-    [sessionId, refreshSessionFiles],
+  const fixWithAI = useCallback(() => {
+    setAgentOpen(true);
+    chatControlRef.current?.send(
+      "The document fails to compile. Find the cause and fix it.",
+    );
+  }, []);
+
+  // Auto-fix: when enabled in the chat pane, a failing compile triggers one
+  // agent fix attempt per distinct error log (no retry loops on the same log).
+  useEffect(() => {
+    if (status !== "error" || !log) return;
+    const ctl = chatControlRef.current;
+    if (!ctl?.autoFix || ctl.streaming || lastAutoFixedLog.current === log) return;
+    lastAutoFixedLog.current = log;
+    fixWithAI();
+  }, [status, log, fixWithAI]);
+
+  const fileUrl = useCallback(
+    (name: string) => (projectRef.current ? projectFileUrl(projectRef.current, name) : ""),
+    [],
   );
 
-  // Files that exist only server-side (e.g. figures the agent generated).
-  const generatedFiles = useMemo(
-    () => sessionFiles.filter((f) => !(f in files)),
-    [sessionFiles, files],
-  );
-  const fileUrl = useCallback((name: string) => sessionFileUrl(sessionId, name), [sessionId]);
-
-  /** Upload a data file into the session; returns an error message or null. */
+  /** Upload a file (data, image, bib) straight into the project. */
   const uploadFile = useCallback(
     async (file: File): Promise<string | null> => {
-      const res = await uploadSessionFile(sessionId, file);
-      if (!res.ok) return res.error;
-      await refreshSessionFiles();
+      const id = projectRef.current;
+      if (!id) return "No project open.";
+      const res = await saveProjectFile(id, file.name, file);
+      if (!res.ok) return "error" in res ? res.error : "Upload failed.";
+      await refreshProjectFiles();
       return null;
     },
-    [sessionId, refreshSessionFiles],
+    [refreshProjectFiles],
   );
-
-  // Debounced compile whenever any file changes (aux files feed \input/\bibliography).
-  useEffect(() => {
-    const t = setTimeout(() => void runCompile(files[MAIN]), DEBOUNCE_MS);
-    return () => clearTimeout(t);
-  }, [files, runCompile]);
-
-  // Cmd/Ctrl+Enter forces an immediate recompile.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-        e.preventDefault();
-        void runCompile(mainRef.current);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [runCompile]);
-
-  const getDocument = useCallback(() => mainRef.current, []);
-  const getLastCompile = useCallback(() => lastCompileRef.current, []);
 
   const openFile = useCallback((f: string) => {
     setOpenTabs((tabs) => (tabs.includes(f) ? tabs : [...tabs, f]));
@@ -193,15 +371,91 @@ export default function App() {
     setActive((a) => (a === f ? MAIN : a));
   }, []);
 
-  const applyEdit = useCallback((edit: ProposedEdit): ApplyResult => {
-    const result = applyEditToDoc(mainRef.current, edit);
-    if (result.ok) {
-      mainRef.current = result.doc;
-      setFiles((f) => ({ ...f, [MAIN]: result.doc }));
-      setActive(MAIN); // surface the change the agent just made
+  const newFile = useCallback(async () => {
+    const id = projectRef.current;
+    if (!id) return;
+    const path = window.prompt("New file path (e.g. sections/method.tex):")?.trim();
+    if (!path) return;
+    if (filesRef.current[path] !== undefined) {
+      openFile(path);
+      return;
     }
-    return result;
-  }, []);
+    const r = await saveProjectFile(id, path, "");
+    if (!r.ok) {
+      window.alert("error" in r ? r.error : "Could not create the file.");
+      return;
+    }
+    mtimes.current[path] = r.mtimeMs;
+    setFiles((f) => ({ ...f, [path]: "" }));
+    openFile(path);
+  }, [openFile]);
+
+  const renameFile = useCallback(
+    async (path: string) => {
+      const id = projectRef.current;
+      if (!id) return;
+      if (path === MAIN) {
+        window.alert("main.tex is the compile target — it cannot be renamed.");
+        return;
+      }
+      const to = window.prompt("Rename to:", path)?.trim();
+      if (!to || to === path) return;
+      await saveDirty(); // rename what's on disk, not a stale copy
+      const r = await renameProjectFileApi(id, path, to);
+      if (!r.ok) {
+        window.alert(r.error ?? "Rename failed.");
+        return;
+      }
+      setFiles((f) => {
+        const { [path]: content, ...rest } = f;
+        return content !== undefined ? { ...rest, [to]: content } : rest;
+      });
+      mtimes.current[to] = Date.now();
+      delete mtimes.current[path];
+      dirty.current.delete(path);
+      setOpenTabs((tabs) => tabs.map((t) => (t === path ? to : t)));
+      setActive((a) => (a === path ? to : a));
+      void refreshProjectFiles();
+    },
+    [saveDirty, refreshProjectFiles],
+  );
+
+  const deleteFile = useCallback(
+    async (path: string) => {
+      const id = projectRef.current;
+      if (!id) return;
+      if (!window.confirm(`Delete ${path} from the project?`)) return;
+      const r = await deleteProjectFileApi(id, path);
+      if (!r.ok) {
+        window.alert(r.error ?? "Delete failed.");
+        return;
+      }
+      setFiles((f) => {
+        const { [path]: _gone, ...rest } = f;
+        return rest;
+      });
+      delete mtimes.current[path];
+      dirty.current.delete(path);
+      closeTab(path);
+      void refreshProjectFiles();
+    },
+    [closeTab],
+  );
+
+  const applyEdit = useCallback(
+    (edit: ProposedEdit): ApplyResult => {
+      const target = edit.file ?? MAIN;
+      const current = filesRef.current[target] ?? ""; // "" = the agent created a new file
+      const result = applyEditToDoc(current, edit);
+      if (result.ok) {
+        dirty.current.add(target);
+        setFiles((f) => ({ ...f, [target]: result.doc }));
+        openFile(target); // surface the change the agent just made
+      }
+      return result;
+    },
+    [openFile],
+  );
 
   // Inline suggestion buttons resolve through the chat pane, so the diff
   // card there flips to applied/rejected in the same motion.
@@ -214,16 +468,39 @@ export default function App() {
     [],
   );
 
+  /** Ctrl/Cmd+click in the editor → scroll the PDF to that line. */
+  const syncToPdf = useCallback(async (file: string, line: number) => {
+    const id = projectRef.current;
+    if (!id) return;
+    const hit = await synctexForward(id, file, line);
+    if (hit) setSyncTarget({ ...hit, stamp: Date.now() });
+  }, []);
+
+  /** Double-click in the PDF → open the source file at that line. */
+  const syncToSource = useCallback(
+    async (page: number, x: number, y: number) => {
+      const id = projectRef.current;
+      if (!id) return;
+      const hit = await synctexReverse(id, page, x, y);
+      if (!hit || filesRef.current[hit.file] === undefined) return;
+      openFile(hit.file);
+      setJumpTo({ ...hit, stamp: Date.now() });
+    },
+    [openFile],
+  );
+
   const downloadPdf = useCallback(() => {
     if (!pdf) return;
     const blob = new Blob([pdf], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "main.pdf";
+    a.download = `${projectRef.current ?? "main"}.pdf`;
     a.click();
     URL.revokeObjectURL(url);
   }, [pdf]);
+
+  const projectFiles = useMemo(() => Object.keys(files).sort(), [files]);
 
   return (
     <div className="app">
@@ -231,7 +508,11 @@ export default function App() {
         fileName={active}
         status={status}
         agentOpen={agentOpen}
-        onRecompile={() => void runCompile(mainRef.current)}
+        projects={projects}
+        currentProject={projectId}
+        onSwitchProject={(id) => void switchProject(id)}
+        onNewProject={() => void newProject()}
+        onRecompile={() => void runCompile()}
         onToggleAgent={() => setAgentOpen((o) => !o)}
         onDownload={downloadPdf}
         canDownload={!!pdf}
@@ -246,27 +527,45 @@ export default function App() {
                 onChange={setActiveText}
                 onCursor={setCursor}
                 files={openTabs}
-                projectFiles={FILE_ORDER}
+                projectFiles={projectFiles}
                 active={active}
                 onSelect={openFile}
                 onCloseTab={closeTab}
-                generatedFiles={generatedFiles}
+                generatedFiles={binaryFiles}
                 fileUrl={fileUrl}
                 onUpload={uploadFile}
-                suggestions={active === MAIN ? pendingEdits : undefined}
+                onNewFile={() => void newFile()}
+                onRenameFile={(f) => void renameFile(f)}
+                onDeleteFile={(f) => void deleteFile(f)}
+                suggestions={pendingEdits.filter((e) => (e.file ?? MAIN) === active)}
                 onAcceptSuggestion={acceptSuggestion}
                 onRejectSuggestion={rejectSuggestion}
+                fileContents={files}
+                allFiles={[...projectFiles, ...binaryFiles]}
+                diagnostics={diagnostics}
+                onSyncToPdf={(f, l) => void syncToPdf(f, l)}
+                jumpTo={jumpTo}
               />
             </Panel>
             <PanelResizeHandle className="resize-handle" />
             <Panel defaultSize={50} minSize={22}>
-              <PreviewPane pdf={pdf} status={status} log={log} onPages={setPages} />
+              <PreviewPane
+                pdf={pdf}
+                status={status}
+                log={log}
+                onPages={setPages}
+                syncTarget={syncTarget}
+                onSyncClick={(p, x, y) => void syncToSource(p, x, y)}
+                onFixWithAI={fixWithAI}
+              />
             </Panel>
           </PanelGroup>
         </div>
 
         {/* Kept mounted so collapsing the agent never loses the conversation. */}
         <ChatPane
+          projectId={projectId}
+          onBeforeSend={saveDirty}
           sessionId={sessionId}
           getDocument={getDocument}
           getFiles={auxFiles}
@@ -276,8 +575,9 @@ export default function App() {
           collapsed={!agentOpen}
           onPendingEditsChange={setPendingEdits}
           resolverRef={editResolverRef}
-          onTurnEnd={refreshSessionFiles}
-          generatedFiles={generatedFiles}
+          controlRef={chatControlRef}
+          onTurnEnd={() => void refreshProjectFiles()}
+          generatedFiles={binaryFiles}
         />
 
         {!agentOpen && (

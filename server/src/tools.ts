@@ -1,20 +1,32 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { compileTex } from "./compile.js";
-import { sessionDir } from "./compile.js";
+import { mkdir, readFile, writeFile, rm, cp, readdir } from "node:fs/promises";
+import {
+  compileTex,
+  compileProject,
+  projectBuildDir,
+  sessionDir,
+  listSessionFiles,
+} from "./compile.js";
+import type { CompileResult } from "./compile.js";
+import { safeProjectFilePath, isTextPath, listFilesInDir } from "./projects.js";
 import { webSearch } from "./research.js";
-import { runPython } from "./python.js";
-import { renderMermaid } from "./mermaid.js";
+import { runPython, runPythonIn } from "./python.js";
+import { renderMermaid, renderMermaidIn } from "./mermaid.js";
 import { renderPdf, extractPdfText, analyzePdfLayout } from "./pdftools.js";
 import { formatLayoutReport } from "./layout.js";
 import { analyzeAts } from "./ats.js";
 import path from "node:path";
+
+const MAIN = "main.tex";
 
 export interface EditEvent {
   id: string;
   explanation: string;
   old_string: string;
   new_string: string;
+  /** Project file the edit targets ("main.tex" unless the agent says otherwise). */
+  file: string;
 }
 
 export interface CheckEvent {
@@ -57,6 +69,11 @@ function truncate(s: string, max = 2500): string {
 export interface AgentToolsOptions {
   initialDoc: string;
   compileSessionId: string;
+  /** When set, the agent works on this PROJECT directory: any text file can be
+   * read/edited (via the `file` param), new files can be created, and
+   * compile_check runs on a scratch mirror so rejecting an edit never leaves
+   * the real files changed. Without it: legacy single-document session mode. */
+  projectDir?: string;
   emitEdit: (e: EditEvent) => void;
   emitCheck: (c: CheckEvent) => void;
   /** Optional: surface non-edit tool activity (search, python, pdf, ats) to the UI. */
@@ -72,9 +89,10 @@ export interface AgentToolsOptions {
  */
 export function createAgentTools(opts: AgentToolsOptions) {
   const state = {
-    doc: opts.initialDoc,
+    /** Working copies, path → content. main.tex is always present. */
+    docs: new Map<string, string>([[MAIN, opts.initialDoc]]),
     edits: 0,
-    /** true when the doc changed since the last compile_check. */
+    /** true when a doc changed since the last compile_check. */
     dirty: false,
     lastCheck: undefined as { ok: boolean; log: string } | undefined,
     /** Pages rendered by the most recent view_pdf, for the recovery loop to
@@ -86,40 +104,127 @@ export function createAgentTools(opts: AgentToolsOptions) {
   /** Signatures of edits already applied this turn — weak models love to repeat themselves. */
   const appliedSigs = new Set<string>();
 
+  const projectDir = opts.projectDir;
+  /** Where run_python / render_mermaid write figures. */
+  const workDir = projectDir ?? sessionDir(opts.compileSessionId);
+
+  /** Resolve a tool's `file` argument to a normalized project path, or an error string. */
+  function resolveTarget(file: string | undefined): { path: string } | { error: string } {
+    const target = (file ?? "").trim() || MAIN;
+    if (target === MAIN) return { path: MAIN };
+    if (!projectDir) {
+      return { error: `Only ${MAIN} can be edited in this session — put everything there.` };
+    }
+    const norm = safeProjectFilePath(target);
+    if (!norm || !isTextPath(norm)) {
+      return {
+        error: `'${target}' is not an editable text file. Use a project-relative path like sections/intro.tex (see list_files).`,
+      };
+    }
+    return { path: norm };
+  }
+
+  /** Working copy of a file, lazily loaded from the project dir on first use. */
+  async function loadDoc(file: string): Promise<string | undefined> {
+    const cached = state.docs.get(file);
+    if (cached !== undefined) return cached;
+    if (!projectDir) return undefined;
+    try {
+      const content = await readFile(path.join(projectDir, file), "utf8");
+      state.docs.set(file, content);
+      return content;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Compile the working state. Project mode compiles a scratch MIRROR
+   * (`.latentdraft/agent`): a copy of the project overlaid with the working
+   * docs — so unaccepted edits are verifiable without ever touching the real
+   * files. Legacy mode compiles main.tex in the session dir as before.
+   */
+  async function compileWorking(): Promise<CompileResult> {
+    if (!projectDir) return compileTex(opts.compileSessionId, state.docs.get(MAIN) ?? "");
+    const mirror = path.join(projectDir, ".latentdraft", "agent");
+    await rm(mirror, { recursive: true, force: true });
+    await mkdir(mirror, { recursive: true });
+    // Copy top-level entries one by one — fs.cp refuses a destination inside
+    // the source, and the mirror lives in the project's own .latentdraft/.
+    for (const entry of await readdir(projectDir)) {
+      if (entry === ".latentdraft" || entry === ".git") continue;
+      await cp(path.join(projectDir, entry), path.join(mirror, entry), {
+        recursive: true,
+        filter: (src) => {
+          const base = path.basename(src);
+          return base !== ".latentdraft" && base !== ".git";
+        },
+      });
+    }
+    for (const [file, content] of state.docs) {
+      const target = path.join(mirror, file);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, content, "utf8");
+    }
+    return compileProject(mirror);
+  }
+
+  /** Where the working compile leaves its PDF. */
+  function workingPdfPath(): string {
+    return projectDir
+      ? path.join(projectBuildDir(path.join(projectDir, ".latentdraft", "agent")), "main.pdf")
+      : path.join(sessionDir(opts.compileSessionId), "main.pdf");
+  }
+
   const edit_document = createTool({
     id: "edit_document",
     description:
-      "Apply a single targeted edit to the working copy of the document and show it " +
-      "to the user as an accept/reject diff. `old_string` must appear EXACTLY ONCE " +
-      "in the CURRENT working document (copy it verbatim, including whitespace). To " +
-      "insert content, anchor on a short unique nearby string and repeat it at the " +
-      "start of `new_string`. To rewrite the whole document from scratch, OMIT " +
-      "old_string and put the entire new document in `new_string`. Make one edit per " +
-      "call; call again for further changes.",
+      "Apply a single targeted edit to the working copy of a document and show it " +
+      "to the user as an accept/reject diff. Edits main.tex unless `file` names " +
+      "another project file. `old_string` must appear EXACTLY ONCE in the CURRENT " +
+      "working file (copy it verbatim, including whitespace). To insert content, " +
+      "anchor on a short unique nearby string and repeat it at the start of " +
+      "`new_string`. To rewrite the whole file from scratch, OMIT old_string and put " +
+      "the entire new content in `new_string`. Make one edit per call; call again " +
+      "for further changes.",
     inputSchema: z.object({
       explanation: z.string().describe("One short sentence: what this edit does."),
+      file: z
+        .string()
+        .optional()
+        .describe('Project file to edit, e.g. "sections/intro.tex". Default: main.tex.'),
       old_string: z
         .string()
         .optional()
         .describe(
-          "Exact text to replace (must match uniquely). Omit or leave empty to replace the ENTIRE document with new_string.",
+          "Exact text to replace (must match uniquely). Omit or leave empty to replace the ENTIRE file with new_string.",
         ),
       new_string: z.string().describe("Replacement text."),
     }),
     execute: async ({ context }) => {
       let { old_string, new_string } = context;
-      const { explanation } = context;
-      // Guard: models routinely omit old_string meaning "insert", which the
-      // contract treats as a FULL-DOCUMENT replacement — silently nuking the
-      // preamble. When new_string is only a fragment, insert it into the body
-      // (before \end{document}) instead of replacing the whole document.
+      const { explanation, file } = context;
+      const target = resolveTarget(file);
+      if ("error" in target) return `NOT APPLIED: ${target.error}`;
+      const doc = await loadDoc(target.path);
+      if (doc === undefined) {
+        return (
+          `NOT APPLIED: ${target.path} does not exist. Check list_files for the real path, ` +
+          `or create it with create_file.`
+        );
+      }
+      // Guard (main.tex only): models routinely omit old_string meaning
+      // "insert", which the contract treats as a FULL-DOCUMENT replacement —
+      // silently nuking the preamble. When new_string is only a fragment,
+      // insert it into the body (before \end{document}) instead.
       let insertedBeforeEnd = false;
       if (
+        target.path === MAIN &&
         (old_string ?? "").length === 0 &&
-        state.doc.trim().length > 0 &&
+        doc.trim().length > 0 &&
         !/\\documentclass|\\begin\{document\}/.test(new_string)
       ) {
-        if (!state.doc.includes("\\end{document}")) {
+        if (!doc.includes("\\end{document}")) {
           return (
             "NOT APPLIED: omitting old_string REPLACES THE ENTIRE DOCUMENT, but new_string " +
             "is not a complete LaTeX document (it has no \\documentclass or \\begin{document}). " +
@@ -128,7 +233,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
             "old_string when you really mean to rewrite the whole document."
           );
         }
-        if (new_string.trim().length >= 20 && state.doc.includes(new_string.trim())) {
+        if (new_string.trim().length >= 20 && doc.includes(new_string.trim())) {
           return (
             "NOT APPLIED: that content is already in the document — the earlier edit worked. " +
             "Do not repeat it. Call read_document to confirm, or compile_check to verify."
@@ -138,45 +243,129 @@ export function createAgentTools(opts: AgentToolsOptions) {
         new_string = `${new_string.replace(/\s+$/, "")}\n\n\\end{document}`;
         insertedBeforeEnd = true;
       }
-      const sig = JSON.stringify([old_string ?? "", new_string]);
+      const sig = JSON.stringify([target.path, old_string ?? "", new_string]);
       if (appliedSigs.has(sig)) {
         return (
           "NOT APPLIED: this exact edit was already applied. The change is in the working " +
           "document — do not repeat it. Call read_document to confirm, or compile_check to verify."
         );
       }
-      const res = applyServerEdit(state.doc, old_string ?? "", new_string);
+      const res = applyServerEdit(doc, old_string ?? "", new_string);
       if (!res.ok) {
         return res.reason === "ambiguous"
           ? "NOT APPLIED: old_string matches multiple locations. Include more surrounding text so it is unique, then try again."
-          : "NOT APPLIED: old_string was not found. Call read_document to see the current document, copy the anchor text verbatim (mind whitespace/newlines), then try again.";
+          : `NOT APPLIED: old_string was not found in ${target.path}. Call read_document` +
+              `${target.path === MAIN ? "" : `({file: "${target.path}"})`} to see the current ` +
+              "content, copy the anchor text verbatim (mind whitespace/newlines), then try again.";
       }
-      state.doc = res.doc;
+      state.docs.set(target.path, res.doc);
       state.edits += 1;
       state.dirty = true;
       appliedSigs.add(sig);
       const id = `edit-${++editSeq}`;
-      opts.emitEdit({ id, explanation, old_string: old_string ?? "", new_string });
+      opts.emitEdit({
+        id,
+        explanation,
+        old_string: old_string ?? "",
+        new_string,
+        file: target.path,
+      });
       return insertedBeforeEnd
         ? "Edit applied: old_string was omitted, so the content was INSERTED at the end of the " +
             "body, just before \\end{document}. If it belongs elsewhere, make a follow-up " +
             "edit_document with a unique old_string anchor. Call compile_check to verify."
-        : "Edit applied to the working copy. Call compile_check to confirm the document still compiles.";
+        : `Edit applied to the working copy of ${target.path}. Call compile_check to confirm the document still compiles.`;
     },
   });
 
   const read_document = createTool({
     id: "read_document",
     description:
-      "Read the CURRENT working copy of the document, including all edits applied so " +
-      "far this turn. Use it to re-anchor before an edit_document call — especially " +
-      "after a NOT APPLIED result, or whenever you are unsure what the document now " +
-      "contains.",
+      "Read the CURRENT working copy of a document (main.tex unless `file` names " +
+      "another project file), including all edits applied so far this turn. Use it " +
+      "to re-anchor before an edit_document call — especially after a NOT APPLIED " +
+      "result, or whenever you are unsure what the file now contains.",
+    inputSchema: z.object({
+      file: z
+        .string()
+        .optional()
+        .describe('Project file to read, e.g. "refs.bib". Default: main.tex.'),
+    }),
+    execute: async ({ context: { file } }) => {
+      const target = resolveTarget(file);
+      if ("error" in target) return target.error;
+      const doc = await loadDoc(target.path);
+      if (doc === undefined) {
+        return `${target.path} does not exist. Check list_files for the real path.`;
+      }
+      return doc.length > 0
+        ? `Current ${target.path} (${doc.length} chars):\n<document>\n${doc}\n</document>`
+        : `(${target.path} is currently empty)`;
+    },
+  });
+
+  const list_files = createTool({
+    id: "list_files",
+    description:
+      "List the project's files with sizes. Text files can be read with " +
+      "read_document({file}) and edited with edit_document({file, …}); images and " +
+      "data files can be referenced from the document (\\includegraphics, pd.read_csv).",
     inputSchema: z.object({}),
     execute: async () => {
-      return state.doc.length > 0
-        ? `Current document (${state.doc.length} chars):\n<document>\n${state.doc}\n</document>`
-        : "(the document is currently empty)";
+      if (!projectDir) {
+        const files = await listSessionFiles(opts.compileSessionId);
+        return [`${MAIN} (the document)`, ...files].join("\n");
+      }
+      const onDisk = (await listFilesInDir(projectDir)) ?? [];
+      const lines = new Map<string, string>();
+      for (const f of onDisk) {
+        lines.set(f.path, `${f.path} (${f.size} bytes${f.binary ? ", binary" : ""})`);
+      }
+      for (const [file] of state.docs) {
+        if (!lines.has(file)) lines.set(file, `${file} (new this turn, pending user accept)`);
+      }
+      return [...lines.values()].sort().join("\n") || "(the project is empty)";
+    },
+  });
+
+  const create_file = createTool({
+    id: "create_file",
+    description:
+      "Create a NEW text file in the project (e.g. sections/method.tex, refs.bib), " +
+      "shown to the user as an accept/reject diff like any edit. Then reference it " +
+      "from main.tex (\\input{sections/method}, \\bibliography{refs}, …) and " +
+      "compile_check. To change an existing file use edit_document instead.",
+    inputSchema: z.object({
+      path: z.string().describe('Project-relative path, e.g. "sections/method.tex".'),
+      content: z.string().describe("The full initial content of the file."),
+      explanation: z.string().optional().describe("One short sentence: why this file."),
+    }),
+    execute: async ({ context: { path: rel, content, explanation } }) => {
+      if (!projectDir) {
+        return `NOT CREATED: this session has no project — put everything in ${MAIN}.`;
+      }
+      const norm = safeProjectFilePath(rel.trim());
+      if (!norm || !isTextPath(norm)) {
+        return "NOT CREATED: use a simple project-relative text-file path like sections/method.tex.";
+      }
+      if ((await loadDoc(norm)) !== undefined) {
+        return `NOT CREATED: ${norm} already exists — edit it with edit_document({file: "${norm}", …}).`;
+      }
+      state.docs.set(norm, content);
+      state.edits += 1;
+      state.dirty = true;
+      const id = `edit-${++editSeq}`;
+      opts.emitEdit({
+        id,
+        explanation: explanation ?? `Create ${norm}`,
+        old_string: "",
+        new_string: content,
+        file: norm,
+      });
+      return (
+        `Created ${norm} in the working copy (pending user accept). Reference it from ` +
+        `${MAIN} if needed, then compile_check.`
+      );
     },
   });
 
@@ -188,7 +377,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       "after making edits, and iterate until it compiles.",
     inputSchema: z.object({}),
     execute: async () => {
-      const result = await compileTex(opts.compileSessionId, state.doc);
+      const result = await compileWorking();
       const log = truncate(result.log ?? "");
       state.dirty = false;
       state.lastCheck = { ok: result.ok, log: truncate(result.log ?? "", 1200) };
@@ -205,16 +394,12 @@ export function createAgentTools(opts: AgentToolsOptions) {
   async function compileToPdf(): Promise<
     { ok: true; pdf: string; log: string } | { ok: false; log: string }
   > {
-    const result = await compileTex(opts.compileSessionId, state.doc);
+    const result = await compileWorking();
     state.dirty = false;
     state.lastCheck = { ok: result.ok, log: truncate(result.log ?? "", 1200) };
     opts.emitCheck(state.lastCheck);
     if (!result.ok) return { ok: false, log: truncate(result.log ?? "") };
-    return {
-      ok: true,
-      pdf: path.join(sessionDir(opts.compileSessionId), "main.pdf"),
-      log: result.log ?? "",
-    };
+    return { ok: true, pdf: workingPdfPath(), log: result.log ?? "" };
   }
 
   const web_search = createTool({
@@ -251,7 +436,9 @@ export function createAgentTools(opts: AgentToolsOptions) {
       code: z.string().describe("The Python source to execute."),
     }),
     execute: async ({ context: { code } }) => {
-      const res = await runPython(opts.compileSessionId, code);
+      const res = projectDir
+        ? await runPythonIn(projectDir, code)
+        : await runPython(opts.compileSessionId, code);
       const filesLine = res.createdFiles.length
         ? `\n\nFiles created (reference by bare filename in \\includegraphics): ${res.createdFiles.join(", ")}`
         : "\n\n(No new files were created.)";
@@ -286,7 +473,9 @@ export function createAgentTools(opts: AgentToolsOptions) {
         .describe('Output PNG name, e.g. "pipeline.png" (default "diagram.png").'),
     }),
     execute: async ({ context: { code, filename } }) => {
-      const res = await renderMermaid(opts.compileSessionId, code, filename);
+      const res = projectDir
+        ? await renderMermaidIn(projectDir, code, filename)
+        : await renderMermaid(opts.compileSessionId, code, filename);
       emitTool({
         name: "render_mermaid",
         summary: res.ok ? `Rendered diagram → ${res.file}` : "Mermaid render failed",
@@ -327,7 +516,9 @@ export function createAgentTools(opts: AgentToolsOptions) {
         report = `(layout analysis failed: ${String(err)})`;
       }
       try {
-        const prefix = path.join(sessionDir(opts.compileSessionId), "preview");
+        const prefix = projectDir
+          ? path.join(projectDir, ".latentdraft", "preview")
+          : path.join(sessionDir(opts.compileSessionId), "preview");
         const pages = await renderPdf(compiled.pdf, prefix, max_pages ?? 3);
         state.renderedImages = pages.map((p) => p.base64);
         emitTool({ name: "view_pdf", summary: `Inspected layout (${pages.length} page(s) rendered)`, ok: true });
@@ -378,7 +569,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
   async function finalize(): Promise<{ ok: boolean; log: string } | undefined> {
     if (state.edits === 0) return undefined;
     if (!state.dirty && state.lastCheck) return state.lastCheck;
-    const result = await compileTex(opts.compileSessionId, state.doc);
+    const result = await compileWorking();
     state.dirty = false;
     state.lastCheck = { ok: result.ok, log: truncate(result.log ?? "", 1200) };
     opts.emitCheck(state.lastCheck);
@@ -386,8 +577,19 @@ export function createAgentTools(opts: AgentToolsOptions) {
   }
 
   return {
-    tools: { edit_document, read_document, compile_check, web_search, run_python, render_mermaid, view_pdf, ats_check },
-    getDoc: () => state.doc,
+    tools: {
+      edit_document,
+      read_document,
+      list_files,
+      create_file,
+      compile_check,
+      web_search,
+      run_python,
+      render_mermaid,
+      view_pdf,
+      ats_check,
+    },
+    getDoc: () => state.docs.get(MAIN) ?? "",
     /** True once the agent has compiled at least once this turn — after that,
      * the editor's pre-turn compile log is stale and should stop being shown. */
     hasChecked: () => state.lastCheck !== undefined,
@@ -406,9 +608,13 @@ export function buildSystemPrompt(
   auxFiles: string[] = [],
   /** Error log from the user's last in-editor compile, when it FAILED. */
   editorCompileLog?: string,
+  /** True when the agent works on a project: file param + create_file available. */
+  multiFile = false,
 ): string {
   const auxNote = auxFiles.length
-    ? `\n\nThe compile directory also contains these project files (usable via \\input, \\bibliography, \\includegraphics): ${auxFiles.join(", ")}. You can only edit main.tex.`
+    ? multiFile
+      ? `\n\nProject files besides main.tex: ${auxFiles.join(", ")}. Read any text file with read_document({file: "…"}) and edit it with edit_document({file: "…", …}); create new ones with create_file. Files resolve relative to the project root (\\input{sections/intro}, \\bibliography{refs}, \\includegraphics{figure.png}).`
+      : `\n\nThe compile directory also contains these project files (usable via \\input, \\bibliography, \\includegraphics): ${auxFiles.join(", ")}. You can only edit main.tex.`
     : "";
   const compileNote = editorCompileLog
     ? `\n\nWhen the user sent this message, the editor's last compile of this document had FAILED with the log below. Base your fix on it: fix the reported cause with edit_document, then compile_check until it succeeds.\n<compile_log>\n${truncate(editorCompileLog, 2000)}\n</compile_log>`
@@ -416,8 +622,10 @@ export function buildSystemPrompt(
   return `You are an autonomous LaTeX assistant embedded in an editor, like Cursor but for LaTeX.
 
 You have tools:
-- edit_document(explanation, old_string, new_string): make one targeted change to the working copy. Each change is shown to the user as an accept/reject diff.
-- read_document(): read the CURRENT working copy (with your edits applied). Use it to re-anchor after a NOT APPLIED edit or whenever you are unsure what the document now contains.
+- edit_document(explanation, old_string, new_string, file?): make one targeted change to the working copy (main.tex unless 'file' names another project file). Each change is shown to the user as an accept/reject diff.
+- read_document(file?): read the CURRENT working copy (with your edits applied). Use it to re-anchor after a NOT APPLIED edit or whenever you are unsure what the document now contains.
+- list_files(): list the project's files (sizes, binary markers).
+- create_file(path, content, explanation?): create a NEW text file in the project (a section, a .bib), shown as an accept/reject diff.
 - compile_check(): compile the current working document and get back success or the error log.
 - web_search(query, max_results?): research anything on the web (job postings, companies, technologies, wording). Use it before writing when you need facts you don't have.
 - run_python(code): run Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Uploaded data files (CSV/Excel) are in the same directory: pd.read_csv("data.csv") / pd.read_excel("data.xlsx"), then plot with seaborn. Reference files by bare filename; do not call plt.show().

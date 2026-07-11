@@ -55,7 +55,11 @@ async function snapshot(dir: string): Promise<Map<string, number>> {
  * Matplotlib is forced onto the headless Agg backend.
  */
 export async function runPython(sessionId: string, code: string): Promise<PythonResult> {
-  const dir = sessionDir(sessionId);
+  return runPythonIn(sessionDir(sessionId), code);
+}
+
+/** Same, but in an explicit working directory (a project dir). */
+export async function runPythonIn(dir: string, code: string): Promise<PythonResult> {
   await mkdir(dir, { recursive: true });
   const before = await snapshot(dir);
 

@@ -1,10 +1,12 @@
 # LatentDraft
 
-A Cursor-style LaTeX editor. Three panes:
+A local Overleaf boosted by agents. Three panes:
 
-- **Editor** — raw LaTeX source (CodeMirror)
+- **Editor** — multi-file LaTeX source (CodeMirror) with autocomplete (`\cite{`/`\ref{` keys extracted from your project), inline compile-error squiggles, and SyncTeX (Ctrl/Cmd+click a source line to jump the PDF; double-click the PDF to jump to the source)
 - **Preview** — the compiled PDF, live-updating as you type
-- **Chat** — an AI agent that reads your document and proposes edits as **accept/reject diffs**
+- **Chat** — an AI agent that reads and edits **any project file** (proposed as accept/reject diffs), creates files, generates figures, and can auto-fix compile failures
+
+**Projects are plain folders** under `~/LatentDraft` (or `PROJECTS_ROOT`): normal `.tex`/`.bib`/figure files you can `git init`, edit with other tools, or drop an existing paper into. Everything autosaves; build artifacts stay out of the way in `.latentdraft/` (gitignored automatically). New projects start from a template gallery (article, beamer, CV).
 
 The agent is **provider-agnostic**: it defaults to a local **Ollama** model (no API key), and can also use any OpenAI-compatible endpoint (LM Studio, vLLM, OpenRouter, OpenAI) or Anthropic — all behind one interface (a [Mastra](https://mastra.ai) `Agent` over AI SDK v5 providers).
 
@@ -44,6 +46,7 @@ The server reads these at startup:
 
 | Variable            | Default                  | Purpose                                              |
 | ------------------- | ------------------------ | ---------------------------------------------------- |
+| `PROJECTS_ROOT`     | `~/LatentDraft`          | Directory holding the project folders                |
 | `PORT`              | `5174`                   | API server port                                      |
 | `HOST`              | `127.0.0.1`              | Bind address. Keep localhost — `run_python` executes arbitrary code |
 | `COMPILE_TIMEOUT_MS`| `300000`                 | Kill a Tectonic compile after this many ms           |

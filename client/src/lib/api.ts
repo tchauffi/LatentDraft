@@ -13,79 +13,192 @@ export interface ProposedEdit {
   explanation: string;
   old_string: string;
   new_string: string;
+  /** Project file the edit targets; absent/empty means main.tex. */
+  file?: string;
+}
+
+export interface CompileDiagnostic {
+  file: string;
+  line: number;
+  message: string;
+  severity: "error" | "warning";
 }
 
 export type CompileResult =
   | { ok: true; pdf: ArrayBuffer }
-  | { ok: false; log: string };
+  | { ok: false; log: string; diagnostics?: CompileDiagnostic[] };
 
-export async function fetchProviders(): Promise<ProviderInfo[]> {
-  const res = await fetch("/api/providers");
-  if (!res.ok) throw new Error(`providers: ${res.status}`);
-  const data = (await res.json()) as { providers: ProviderInfo[] };
-  return data.providers;
+/* ---- Projects: plain folders on the server's disk ---- */
+
+export interface ProjectInfo {
+  id: string;
+  mtimeMs: number;
 }
 
-export async function compile(
-  sessionId: string,
-  tex: string,
-  files?: Record<string, string>,
-): Promise<CompileResult> {
+export interface ProjectFileInfo {
+  path: string;
+  size: number;
+  mtimeMs: number;
+  binary: boolean;
+}
+
+export async function fetchProjects(): Promise<{ projects: ProjectInfo[]; templates: string[] }> {
+  const res = await fetch("/api/projects");
+  if (!res.ok) throw new Error(`projects: ${res.status}`);
+  return (await res.json()) as { projects: ProjectInfo[]; templates: string[] };
+}
+
+export async function createProjectApi(
+  name: string,
+  template?: string,
+): Promise<{ id: string } | { error: string }> {
+  const res = await fetch("/api/projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, template }),
+  });
+  return (await res.json()) as { id: string } | { error: string };
+}
+
+export async function fetchProjectFiles(id: string): Promise<ProjectFileInfo[]> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/files`);
+  if (!res.ok) throw new Error(`project files: ${res.status}`);
+  return ((await res.json()) as { files: ProjectFileInfo[] }).files;
+}
+
+export function projectFileUrl(id: string, path: string): string {
+  return `/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`;
+}
+
+export async function fetchProjectFileText(
+  id: string,
+  path: string,
+): Promise<{ content: string; mtimeMs: number } | null> {
+  const res = await fetch(projectFileUrl(id, path));
+  if (!res.ok) return null;
+  return {
+    content: await res.text(),
+    mtimeMs: Number(res.headers.get("X-Mtime") ?? 0),
+  };
+}
+
+export type SaveResult =
+  | { ok: true; mtimeMs: number }
+  | { ok: false; conflict: { mtimeMs: number; content: string } }
+  | { ok: false; error: string };
+
+/** Save one file; a base mtime makes the server refuse to clobber external edits. */
+export async function saveProjectFile(
+  id: string,
+  path: string,
+  content: string | Blob,
+  baseMtimeMs?: number,
+): Promise<SaveResult> {
   try {
-    const res = await fetch("/api/compile", {
+    const res = await fetch(projectFileUrl(id, path), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        ...(baseMtimeMs !== undefined ? { "X-Base-Mtime": String(baseMtimeMs) } : {}),
+      },
+      body: content,
+    });
+    const data = (await res.json()) as { mtimeMs?: number; content?: string; error?: string };
+    if (res.ok && data.mtimeMs !== undefined) return { ok: true, mtimeMs: data.mtimeMs };
+    if (res.status === 409 && data.content !== undefined) {
+      return { ok: false, conflict: { mtimeMs: data.mtimeMs ?? 0, content: data.content } };
+    }
+    return { ok: false, error: data.error ?? `save failed (${res.status})` };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+export async function renameProjectFileApi(
+  id: string,
+  from: string,
+  to: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error };
+}
+
+export async function deleteProjectFileApi(
+  id: string,
+  path: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`, {
+    method: "DELETE",
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error };
+}
+
+/** SyncTeX forward: source position → PDF position (pt, top-left origin). */
+export async function synctexForward(
+  id: string,
+  file: string,
+  line: number,
+): Promise<{ page: number; x: number; y: number } | null> {
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(id)}/synctex/forward`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, tex, files }),
+      body: JSON.stringify({ file, line }),
     });
+    return res.ok ? ((await res.json()) as { page: number; x: number; y: number }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** SyncTeX inverse: PDF position (pt) → source file + line. */
+export async function synctexReverse(
+  id: string,
+  page: number,
+  x: number,
+  y: number,
+): Promise<{ file: string; line: number } | null> {
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(id)}/synctex/reverse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page, x, y }),
+    });
+    return res.ok ? ((await res.json()) as { file: string; line: number }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Compile the project FROM DISK — dirty buffers must be saved first. */
+export async function compileProjectApi(id: string): Promise<CompileResult> {
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(id)}/compile`, { method: "POST" });
     const contentType = res.headers.get("Content-Type") ?? "";
     if (contentType.includes("application/pdf")) {
       return { ok: true, pdf: await res.arrayBuffer() };
     }
     const data = (await res.json().catch(() => ({ log: "Unknown compile error" }))) as {
       log?: string;
+      diagnostics?: CompileDiagnostic[];
     };
-    return { ok: false, log: data.log ?? "Unknown compile error" };
+    return { ok: false, log: data.log ?? "Unknown compile error", diagnostics: data.diagnostics };
   } catch (err) {
-    // Network failure (server down, connection dropped) — surface it like a
-    // compile error instead of leaving the UI stuck on "compiling…".
     return { ok: false, log: `Could not reach the compile server: ${String(err)}` };
   }
 }
 
-/** Project files in the compile session (aux files + agent-generated figures). */
-export async function fetchSessionFiles(sessionId: string): Promise<string[]> {
-  try {
-    const res = await fetch(`/api/session-files?sessionId=${encodeURIComponent(sessionId)}`);
-    if (!res.ok) return [];
-    const data = (await res.json()) as { files?: unknown };
-    return Array.isArray(data.files) ? data.files.filter((f): f is string => typeof f === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-/** URL that serves one session file's content (for image/text previews). */
-export function sessionFileUrl(sessionId: string, name: string): string {
-  return `/api/session-file?sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`;
-}
-
-/** Upload a data file (CSV/Excel/…) into the compile session. */
-export async function uploadSessionFile(
-  sessionId: string,
-  file: File,
-): Promise<{ ok: true; file: string } | { ok: false; error: string }> {
-  try {
-    const res = await fetch(sessionFileUrl(sessionId, file.name), {
-      method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: file,
-    });
-    const data = (await res.json().catch(() => ({}))) as { file?: string; error?: string };
-    if (res.ok && data.file) return { ok: true, file: data.file };
-    return { ok: false, error: data.error ?? `upload failed (${res.status})` };
-  } catch (err) {
-    return { ok: false, error: String(err) };
-  }
+export async function fetchProviders(): Promise<ProviderInfo[]> {
+  const res = await fetch("/api/providers");
+  if (!res.ok) throw new Error(`providers: ${res.status}`);
+  const data = (await res.json()) as { providers: ProviderInfo[] };
+  return data.providers;
 }
 
 export interface ChatMessage {
@@ -116,6 +229,8 @@ export interface StreamHandlers {
 export interface ChatBody {
   provider: string;
   model: string;
+  /** The project the agent works on (multi-file mode). */
+  projectId?: string;
   /** The editor's compile session, shared with the agent so generated files
    * (figures from run_python) resolve when the preview recompiles. */
   sessionId?: string;
@@ -170,6 +285,7 @@ export async function streamChat(
           explanation: String(evt.explanation ?? ""),
           old_string: String(evt.old_string ?? ""),
           new_string: String(evt.new_string ?? ""),
+          file: typeof evt.file === "string" && evt.file ? evt.file : undefined,
         });
         break;
       case "check":

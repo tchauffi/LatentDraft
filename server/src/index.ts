@@ -1,12 +1,20 @@
 import express from "express";
 import {
-  compileTex,
-  writeSessionFiles,
-  writeSessionUpload,
   cleanupStaleSessions,
-  listSessionFiles,
-  sessionFilePath,
+  compileProject,
 } from "./compile.js";
+import {
+  listProjects,
+  createProject,
+  listProjectFiles,
+  readProjectFile,
+  writeProjectFile,
+  renameProjectFile,
+  deleteProjectFile,
+  projectDir,
+} from "./projects.js";
+import { TEMPLATES } from "./templates.js";
+import { loadProjectSyncTex, forwardSearch, reverseSearch } from "./synctex.js";
 import { listProviders } from "./providers.js";
 import { streamChat, type ChatRequest } from "./chat.js";
 
@@ -47,66 +55,125 @@ app.get("/api/providers", async (_req, res) => {
   }
 });
 
-app.post("/api/compile", async (req, res) => {
-  const { sessionId, tex, files } = req.body ?? {};
-  if (typeof tex !== "string") {
-    res.status(400).json({ ok: false, log: "Missing 'tex' string in request body." });
+/* ---- Projects: plain directories under PROJECTS_ROOT ---- */
+
+app.get("/api/projects", async (_req, res) => {
+  res.json({ projects: await listProjects(), templates: Object.keys(TEMPLATES) });
+});
+
+app.post("/api/projects", async (req, res) => {
+  const { name, template } = req.body ?? {};
+  if (typeof name !== "string" || !name.trim()) {
+    res.status(400).json({ error: "Expected { name, template? }." });
     return;
   }
-  const session = typeof sessionId === "string" ? sessionId : "default";
-  // Auxiliary project files (refs.bib, sections/…) so \input and \bibliography resolve.
-  await writeSessionFiles(session, stringFiles(files));
-  const result = await compileTex(session, tex);
-  if (result.ok && result.pdf) {
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("X-Compile-Ok", "1");
-    res.send(result.pdf);
-  } else {
-    res.status(200).json({ ok: false, log: result.log });
+  const result = await createProject(name, typeof template === "string" ? template : undefined);
+  if ("error" in result) res.status(400).json(result);
+  else res.json(result);
+});
+
+app.get("/api/projects/:id/files", async (req, res) => {
+  const files = await listProjectFiles(req.params.id);
+  if (!files) res.status(404).json({ error: "Project not found." });
+  else res.json({ files });
+});
+
+app.get("/api/projects/:id/file", async (req, res) => {
+  const rel = typeof req.query.path === "string" ? req.query.path : "";
+  const file = await readProjectFile(req.params.id, rel);
+  if (!file) {
+    res.status(404).json({ error: "Not found." });
+    return;
   }
+  res.setHeader("X-Mtime", String(file.mtimeMs));
+  res.type(rel.split("/").pop() ?? "bin").send(file.data);
 });
 
-/** Project files in a compile session (aux files + generated figures) — feeds the file tree. */
-app.get("/api/session-files", async (req, res) => {
-  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "default";
-  res.json({ files: await listSessionFiles(sessionId) });
-});
-
-/** Upload a data file (CSV/Excel/…) into the compile session, raw bytes in the body. */
 app.put(
-  "/api/session-file",
+  "/api/projects/:id/file",
   express.raw({ type: () => true, limit: "25mb" }),
   async (req, res) => {
-    const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "default";
-    const name = typeof req.query.name === "string" ? req.query.name : "";
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-      res.status(400).json({ error: "Empty upload body." });
-      return;
-    }
-    const rel = await writeSessionUpload(sessionId, name, req.body);
-    if (!rel) {
-      res.status(400).json({
-        error:
-          "Unsupported file. Allowed: csv, tsv, xlsx, xls, json, txt, dat, png, jpg, svg, pdf, bib.",
+    const rel = typeof req.query.path === "string" ? req.query.path : "";
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const baseHeader = req.header("X-Base-Mtime");
+    const baseMtimeMs = baseHeader ? Number(baseHeader) : undefined;
+    const result = await writeProjectFile(
+      req.params.id,
+      rel,
+      body,
+      Number.isFinite(baseMtimeMs) ? baseMtimeMs : undefined,
+    );
+    if (result.ok) res.json({ mtimeMs: result.mtimeMs });
+    else if ("conflict" in result) {
+      res.status(409).json({
+        error: "File changed on disk since it was loaded.",
+        mtimeMs: result.conflict.mtimeMs,
+        content: result.conflict.content,
       });
-      return;
-    }
-    res.json({ ok: true, file: rel });
+    } else res.status(400).json({ error: result.error });
   },
 );
 
-/** Serve one session file (e.g. a generated PNG) for previewing in the client. */
-app.get("/api/session-file", (req, res) => {
-  const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : "default";
-  const name = typeof req.query.name === "string" ? req.query.name : "";
-  const filePath = sessionFilePath(sessionId, name);
-  if (!filePath) {
-    res.status(400).json({ error: "Bad file name." });
+app.post("/api/projects/:id/rename", async (req, res) => {
+  const { from, to } = req.body ?? {};
+  if (typeof from !== "string" || typeof to !== "string") {
+    res.status(400).json({ error: "Expected { from, to }." });
     return;
   }
-  res.sendFile(filePath, (err) => {
-    if (err && !res.headersSent) res.status(404).json({ error: "Not found." });
-  });
+  const result = await renameProjectFile(req.params.id, from, to);
+  if (result.ok) res.json({ ok: true });
+  else res.status(400).json({ error: result.error });
+});
+
+app.delete("/api/projects/:id/file", async (req, res) => {
+  const rel = typeof req.query.path === "string" ? req.query.path : "";
+  const result = await deleteProjectFile(req.params.id, rel);
+  if (result.ok) res.json({ ok: true });
+  else res.status(400).json({ error: result.error });
+});
+
+/** SyncTeX forward search: source {file, line} → PDF {page, x, y} in pt. */
+app.post("/api/projects/:id/synctex/forward", async (req, res) => {
+  const dir = projectDir(req.params.id);
+  const { file, line } = req.body ?? {};
+  if (!dir || typeof file !== "string" || typeof line !== "number") {
+    res.status(400).json({ error: "Expected { file, line }." });
+    return;
+  }
+  const data = await loadProjectSyncTex(dir);
+  const hit = data && forwardSearch(data, file, Math.round(line));
+  if (!hit) res.status(404).json({ error: "No synctex data for that location yet." });
+  else res.json(hit);
+});
+
+/** SyncTeX inverse search: PDF {page, x, y} in pt → source {file, line}. */
+app.post("/api/projects/:id/synctex/reverse", async (req, res) => {
+  const dir = projectDir(req.params.id);
+  const { page, x, y } = req.body ?? {};
+  if (!dir || typeof page !== "number" || typeof x !== "number" || typeof y !== "number") {
+    res.status(400).json({ error: "Expected { page, x, y }." });
+    return;
+  }
+  const data = await loadProjectSyncTex(dir);
+  const hit = data && reverseSearch(data, Math.round(page), x, y);
+  if (!hit) res.status(404).json({ error: "No synctex data for that location yet." });
+  else res.json(hit);
+});
+
+/** Compile a project FROM DISK — no source in the body; save first. */
+app.post("/api/projects/:id/compile", async (req, res) => {
+  const dir = projectDir(req.params.id);
+  if (!dir) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+  const result = await compileProject(dir);
+  if (result.ok && result.pdf) {
+    res.setHeader("Content-Type", "application/pdf");
+    res.send(result.pdf);
+  } else {
+    res.status(200).json({ ok: false, log: result.log, diagnostics: result.diagnostics ?? [] });
+  }
 });
 
 app.post("/api/chat", async (req, res) => {
@@ -118,6 +185,7 @@ app.post("/api/chat", async (req, res) => {
   await streamChat(res, {
     provider: body.provider,
     model: body.model,
+    projectId: typeof body.projectId === "string" ? body.projectId : undefined,
     sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
     documentText: typeof body.documentText === "string" ? body.documentText : "",
     files: stringFiles(body.files),

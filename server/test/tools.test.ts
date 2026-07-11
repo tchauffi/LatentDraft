@@ -166,3 +166,115 @@ test("system prompt embeds the document and lists aux files when present", () =>
   const withoutAux = buildSystemPrompt("DOC-BODY");
   assert.doesNotMatch(withoutAux, /compile directory also contains/);
 });
+
+/* ---- Multi-file (project mode) ---- */
+
+import { mkdir, writeFile, rm, readFile, access } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+function makeProjectAgent(dir: string, initialDoc: string) {
+  const edits: EditEvent[] = [];
+  const agent = createAgentTools({
+    initialDoc,
+    compileSessionId: "tools-proj-test",
+    projectDir: dir,
+    emitEdit: (e) => edits.push(e),
+    emitCheck: () => {},
+  });
+  return { agent, edits };
+}
+
+test("project mode: edit_document routes to another file and tags the event", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-a`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(path.join(dir, "sections"), { recursive: true });
+  await writeFile(path.join(dir, "sections/intro.tex"), "Old intro text.\n");
+
+  const { agent, edits } = makeProjectAgent(dir, "\\documentclass{article}");
+  const result = await exec(agent.tools.edit_document, {
+    explanation: "update intro",
+    file: "sections/intro.tex",
+    old_string: "Old intro text.",
+    new_string: "New intro text.",
+  });
+  assert.match(String(result), /applied/i);
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].file, "sections/intro.tex");
+  // The REAL file is untouched — accept/reject belongs to the user.
+  assert.equal(await readFile(path.join(dir, "sections/intro.tex"), "utf8"), "Old intro text.\n");
+  // But the agent's working copy sees the change.
+  const read = await exec(agent.tools.read_document, { file: "sections/intro.tex" });
+  assert.match(String(read), /New intro text\./);
+});
+
+test("project mode: edit_document on a missing file points at list_files/create_file", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-b`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const { agent } = makeProjectAgent(dir, "doc");
+  const result = await exec(agent.tools.edit_document, {
+    explanation: "x",
+    file: "sections/nope.tex",
+    old_string: "a",
+    new_string: "b",
+  });
+  assert.match(String(result), /NOT APPLIED/);
+  assert.match(String(result), /does not exist/);
+});
+
+test("legacy mode (no projectDir): only main.tex is editable", async () => {
+  const { agent } = makeAgent("doc");
+  const result = await exec(agent.tools.edit_document, {
+    explanation: "x",
+    file: "refs.bib",
+    old_string: "a",
+    new_string: "b",
+  });
+  assert.match(String(result), /Only main\.tex/);
+});
+
+test("project mode: create_file stages a new file and emits a full-content edit", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-c`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const { agent, edits } = makeProjectAgent(dir, "doc");
+  const result = await exec(agent.tools.create_file, {
+    path: "sections/method.tex",
+    content: "\\section{Method}\n",
+  });
+  assert.match(String(result), /Created sections\/method\.tex/);
+  assert.equal(edits.length, 1);
+  assert.deepEqual(
+    [edits[0].file, edits[0].old_string, edits[0].new_string],
+    ["sections/method.tex", "", "\\section{Method}\n"],
+  );
+  // Not on disk — pending the user's accept.
+  await assert.rejects(access(path.join(dir, "sections/method.tex")));
+  // And create_file refuses to clobber.
+  await writeFile(path.join(dir, "notes.txt"), "existing");
+  assert.match(String(await exec(agent.tools.create_file, { path: "notes.txt", content: "x" })), /already exists/);
+});
+
+test("project mode: compile_check compiles a mirror with working edits, real files untouched", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-d`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(path.join(dir, "sections"), { recursive: true });
+  const disk = "\\documentclass{article}\\begin{document}\\input{sections/body}\\end{document}";
+  await writeFile(path.join(dir, "main.tex"), disk);
+  await writeFile(path.join(dir, "sections/body.tex"), "From disk. \\badmacroX{}");
+
+  const { agent } = makeProjectAgent(dir, disk);
+  // Fix the aux file ONLY in the working copy.
+  await exec(agent.tools.edit_document, {
+    explanation: "fix",
+    file: "sections/body.tex",
+    old_string: "\\badmacroX{}",
+    new_string: "Fixed.",
+  });
+  const result = await exec(agent.tools.compile_check, {});
+  assert.match(String(result), /SUCCEEDED/, String(result));
+  // Real project untouched: source still broken on disk, no build artifacts in it.
+  assert.match(await readFile(path.join(dir, "sections/body.tex"), "utf8"), /badmacroX/);
+  await assert.rejects(access(path.join(dir, "main.pdf")));
+});
