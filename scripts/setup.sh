@@ -26,9 +26,9 @@ if [ "${SKIP_VENV:-}" = "1" ]; then
 elif [ -x server/.venv/bin/python ]; then
   echo "venv: server/.venv already present"
 else
-  echo "venv: creating server/.venv (matplotlib, seaborn, pandas, numpy, openpyxl, pymupdf)"
+  echo "venv: creating server/.venv (see server/requirements.txt)"
   python3 -m venv server/.venv
-  server/.venv/bin/pip install --quiet matplotlib seaborn pandas numpy openpyxl pymupdf
+  server/.venv/bin/pip install --quiet -r server/requirements.txt
 fi
 
 echo "setup: done — run 'npm run dev' (development) or 'npm run build && npm start' (production)"

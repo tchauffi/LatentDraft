@@ -38,7 +38,7 @@ jobs:
           key: tectonic-bundle-${{ runner.os }}
 
       - name: Install python deps
-        run: pip install matplotlib seaborn pandas numpy openpyxl pymupdf
+        run: pip install -r server/requirements.txt
 
       - run: npm run typecheck
 
