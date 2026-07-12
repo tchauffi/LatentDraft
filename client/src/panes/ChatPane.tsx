@@ -599,7 +599,7 @@ export default function ChatPane({
             placeholder={
               streaming
                 ? "Streaming…"
-                : "Ask the agent to edit, explain, or fix your LaTeX… (/check-bibtex verifies references)"
+                : "Ask the agent to edit, explain, or fix your LaTeX… (type / for commands)"
             }
             onChange={(e) => {
               setInput(e.target.value);
@@ -698,6 +698,7 @@ export default function ChatPane({
 
 const TOOL_ICON: Record<string, string> = {
   web_search: "🔎",
+  fetch_url: "🌐",
   run_python: "🐍",
   view_pdf: "👁️",
   ats_check: "📋",

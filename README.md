@@ -7,7 +7,7 @@ A local latex editor boosted by agents. Three panes:
 
 - **Editor** — multi-file LaTeX source (CodeMirror) with autocomplete (`\cite{`/`\ref{` keys extracted from your project), inline compile-error squiggles, and SyncTeX (Ctrl/Cmd+click a source line to jump the PDF; double-click the PDF to jump to the source)
 - **Preview** — the compiled PDF, live-updating as you type
-- **Chat** — an AI agent that reads and edits **any project file** (proposed as accept/reject diffs), creates files, generates figures, and can auto-fix compile failures. Slash commands (type `/` for autocomplete): `/check-bibtex` verifies your references — including that the cited papers actually exist
+- **Chat** — an AI agent that reads and edits **any project file** (proposed as accept/reject diffs), creates files, generates figures, and can auto-fix compile failures. Slash commands (type `/` for autocomplete): `/check-bibtex` verifies your references — including that the cited papers actually exist; `/apply <job-url>` tailors your resume to a job posting, plan first, edits only after you approve
 
 **Projects are plain folders** under `~/LatentDraft` (or `PROJECTS_ROOT`): normal `.tex`/`.bib`/figure files you can `git init`, edit with other tools, or drop an existing paper into. Everything autosaves; build artifacts stay out of the way in `.latentdraft/` (gitignored automatically). New projects start from a template gallery (article, beamer, CV).
 
@@ -101,6 +101,7 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - `read_document()` — reads the current working copy back, so the model can re-anchor after a failed edit.
 - `compile_check()` — compiles the working copy with Tectonic and returns success or the error log.
 - `web_search(query)` — researches on the web (DuckDuckGo by default; Tavily/Brave with a key).
+- `fetch_url(url)` — fetches one specific web page and returns its readable text (a job posting, an article, docs). Login-walled or JavaScript-only pages degrade gracefully: the agent is told to ask you to paste the text instead of guessing.
 - `run_python(code)` — runs Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build dir, mainly to generate figures you then `\includegraphics`. The agent compiles in the **same session directory as your preview**, so a generated figure still resolves after you accept the edit. Generated files appear in the editor's file tree (purple dot); click one to preview it.
 - `render_mermaid(code, filename?)` — renders a Mermaid diagram (flowchart, sequence, class, state, ER, gantt, pie, mindmap, …) to a print-quality PNG in the build dir, for conceptual/structural figures that would be awkward to draw in matplotlib.
 - **Data import**: the *"+ Add data file"* button under the file tree uploads a CSV/Excel/image into the compile session — the agent can then `pd.read_csv`/`pd.read_excel` it in `run_python` and plot it with seaborn.
@@ -109,6 +110,15 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - `check_bibtex(verify_online?)` — verifies the bibliography, no compile needed. Locally: every `\cite`-style key must resolve to a `.bib` entry or `\bibitem`, unused entries and missing `\bibliography` targets are flagged, each problem quoted at its source line. Online (the interesting part): every **cited** entry is checked against **Crossref** (does the DOI exist, and does it resolve to the *claimed* paper?), **arXiv** ids, and a Crossref title search — catching **hallucinated references**, the fake-but-plausible papers and DOIs LLMs love to invent. Verdicts are conservative: a network failure reports as "could not check", never as fabricated. Type `/check-bibtex` in the chat to run the whole workflow; like compiles, the bibliography is **re-checked at the end of the turn** if the agent edited files after checking, so fixes can't go unverified.
 
 Only `edit_document` changes your document, and every edit is yours to accept or reject.
+
+### Slash commands
+
+Type `/` in the chat composer for an autocomplete menu of built-in workflows:
+
+- **`/apply <job-url>`** (or `/apply` + a pasted job description) — tailor your resume to a specific posting. The agent fetches the posting, reads your resume, and scores it with `ats_check` against the job description; then it replies with the role's key requirements, a strengths/gaps review, and a **numbered improvement plan** — *without touching your document*. Reply to approve the plan (or change it), and only then does the agent edit, recompile, and re-run `ats_check` to confirm the keyword coverage actually improved. It will never invent experience or skills to match the posting; if a posting is behind a login wall (LinkedIn often is), it asks you to paste the text instead of guessing. Works best with a mid-size model or better — very small local models can struggle to hold the plan-first discipline.
+- **`/check-bibtex`** — verify your references, including that the cited papers actually exist (see `check_bibtex` above).
+
+The chat bubble shows the command you typed; the agent receives the full workflow instruction behind it.
 
 So a typical turn is: **edit → compile_check → (if it fails) read the log, fix, compile_check again → summarize.** This means the changes it proposes are **verified to compile** before you ever see them. When the turn ends you get a green *"✓ Verified — the document compiles with these changes"* banner (or a red one with the log if it couldn't).
 

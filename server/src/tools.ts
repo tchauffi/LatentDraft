@@ -11,6 +11,7 @@ import {
 import type { CompileResult } from "./compile.js";
 import { safeProjectFilePath, isTextPath, listFilesInDir } from "./projects.js";
 import { webSearch } from "./research.js";
+import { fetchPageText } from "./webpage.js";
 import { runPython, runPythonIn } from "./python.js";
 import { renderMermaid, renderMermaidIn } from "./mermaid.js";
 import { renderPdf, extractPdfText, analyzePdfLayout } from "./pdftools.js";
@@ -80,6 +81,8 @@ export interface AgentToolsOptions {
   emitCheck: (c: CheckEvent) => void;
   /** Optional: surface non-edit tool activity (search, python, pdf, ats) to the UI. */
   emitTool?: (e: ToolEvent) => void;
+  /** Injectable fetch for fetch_url — tests stay offline. */
+  fetchFn?: typeof fetch;
 }
 
 /**
@@ -459,6 +462,28 @@ export function createAgentTools(opts: AgentToolsOptions) {
     },
   });
 
+  const fetch_url = createTool({
+    id: "fetch_url",
+    description:
+      "Fetch a specific web page by URL and return its readable text — job postings, " +
+      "articles, documentation. web_search FINDS pages; fetch_url READS one you already " +
+      "have the URL for (e.g. a job posting the user wants the resume tailored to). Some " +
+      "sites (LinkedIn, login-walled pages) return little or no text — when that happens, " +
+      "ask the user to paste the content instead of guessing.",
+    inputSchema: z.object({
+      url: z.string().describe("Full http(s) URL of the page to fetch."),
+    }),
+    execute: async ({ context: { url } }) => {
+      const res = await fetchPageText(url, opts.fetchFn ?? fetch);
+      emitTool({
+        name: "fetch_url",
+        summary: res.ok ? `Fetched ${url}` : `Fetch failed: ${url}`,
+        ok: res.ok,
+      });
+      return res.text;
+    },
+  });
+
   const run_python = createTool({
     id: "run_python",
     description:
@@ -715,6 +740,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       create_file,
       compile_check,
       web_search,
+      fetch_url,
       run_python,
       render_mermaid,
       view_pdf,
@@ -761,6 +787,7 @@ You have tools:
 - create_file(path, content, explanation?): create a NEW text file in the project (a section, a .bib), shown as an accept/reject diff.
 - compile_check(): compile the current working document and get back success or the error log.
 - web_search(query, max_results?): research anything on the web (job postings, companies, technologies, wording). Use it before writing when you need facts you don't have.
+- fetch_url(url): fetch one specific web page and get its readable text. Use it when you HAVE a URL (a job posting, an article) — web_search finds pages, fetch_url reads one. If it returns little or no text (login wall, scripted page), ask the user to paste the content instead of guessing.
 - run_python(code): run Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Uploaded data files (CSV/Excel) are in the same directory: pd.read_csv("data.csv") / pd.read_excel("data.xlsx"), then plot with seaborn. Reference files by bare filename; do not call plt.show().
 - render_mermaid(code, filename?): render a Mermaid DIAGRAM (flowchart, sequence, class, state, ER, gantt, pie, mindmap) to a PNG in the build directory. Prefer it over Python for conceptual/structural diagrams. Pass raw Mermaid source (no fences), then edit_document to add \\includegraphics{<filename>}.
 - view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm.
@@ -773,6 +800,7 @@ Tool guidance:
 - ALWAYS write the actual document with edit_document. NEVER paste the finished LaTeX into your chat reply as a substitute for editing — the user's editor only changes through edit_document. If you produced a document but did not call edit_document, you have NOT done the task.
 - Research is for gathering facts, not the goal. Do a FEW focused web_search calls (typically 2–4), then STOP and start writing. Do not keep searching once you have enough to write a solid first draft.
 - For a resume/CV, a good loop is: research briefly → write the document with edit_document → compile_check → view_pdf to sanity-check the layout → ats_check (with the job description if provided) → apply the improvements it suggests. Never fabricate experience to match keywords.
+- When the user asks to TAILOR a resume to a job posting (e.g. via /apply): get the posting text (fetch_url for a URL), run ats_check with it, then present a review and a NUMBERED improvement plan and STOP — do not edit until the user approves. After approval, apply the plan with edit_document, compile_check, and re-run ats_check with the same job description.
 - You do NOT have any other tools (no shell, no file system, no "google"). If you need external info, use web_search.
 
 Workflow when the user reports a BROKEN document ("it doesn't compile", "fix the errors", red log in the editor):
