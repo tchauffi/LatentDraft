@@ -32,6 +32,7 @@ export function normalizeToolName(raw: string, known: ReadonlySet<string>): stri
   if (/bib|cit/.test(name)) return has("check_bibtex");
   if (/compile|build|check|verify/.test(name)) return has("compile_check");
   if (/python|execute|run_|script|calc/.test(name)) return has("run_python");
+  if (/fetch|url|scrape|crawl|visit|open_?page|get_?page|web_?page/.test(name)) return has("fetch_url");
   if (/search|google|browse|bing|duckduck|web|lookup/.test(name)) return has("web_search");
   return undefined;
 }
@@ -68,6 +69,12 @@ export function normalizeToolArgs(
       const code = str(args.code) ?? str(args.python) ?? str(args.script) ?? str(args.source);
       return code !== undefined ? { code } : {};
     }
+    case "fetch_url": {
+      const url =
+        str(args.url) ?? str(args.link) ?? str(args.href) ?? str(args.uri) ??
+        str(args.address) ?? str(args.page);
+      return url !== undefined ? { url } : {};
+    }
     case "view_pdf":
       return typeof args.max_pages === "number" ? { max_pages: args.max_pages } : {};
     case "ats_check": {
@@ -88,6 +95,8 @@ export function hasRequiredArgs(name: string, args: Record<string, unknown>): bo
       return typeof args.query === "string";
     case "run_python":
       return typeof args.code === "string";
+    case "fetch_url":
+      return typeof args.url === "string";
     default:
       return true;
   }
@@ -215,6 +224,7 @@ export function scanBalancedParens(s: string, start: number): number {
 /** Where a bare string/number argument lands for each tool, e.g. web_search("x"). */
 const PRIMARY_ARG: Record<string, string> = {
   web_search: "query",
+  fetch_url: "url",
   run_python: "code",
   ats_check: "job_description",
   view_pdf: "max_pages",

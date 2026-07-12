@@ -356,6 +356,36 @@ test("finalizeBib rechecks the bibliography after edits, offline", async (t) => 
   assert.equal(toolEvents.filter((e) => e.name === "check_bibtex").length, 2);
 });
 
+test("fetch_url returns page text through the injected fetch and emits its event", async () => {
+  const toolEvents: { name: string; summary: string; ok: boolean }[] = [];
+  const fakeFetch = (async () =>
+    new Response(
+      `<html><body><h1>Staff Engineer</h1><p>${"We build LaTeX tooling. ".repeat(20)}</p></body></html>`,
+      { status: 200, headers: { "content-type": "text/html" } },
+    )) as typeof fetch;
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-fetch-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => toolEvents.push(e),
+    fetchFn: fakeFetch,
+  });
+
+  assert.ok(agent.tools.fetch_url, "fetch_url is registered");
+  assert.match(buildSystemPrompt("x"), /fetch_url/);
+
+  const text = String(await exec(agent.tools.fetch_url, { url: "https://example.com/job" }));
+  assert.match(text, /Staff Engineer/);
+  assert.equal(toolEvents.length, 1);
+  assert.equal(toolEvents[0].name, "fetch_url");
+  assert.equal(toolEvents[0].ok, true);
+
+  const bad = String(await exec(agent.tools.fetch_url, { url: "not a url" }));
+  assert.match(bad, /Not a fetchable URL/);
+  assert.equal(toolEvents[1].ok, false);
+});
+
 test("finalizeBib stays inactive when the agent edited without ever checking", async (t) => {
   const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-g`);
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -17,6 +17,27 @@ test("expansion is case-insensitive and keeps trailing text as context", () => {
   assert.match(exp.prompt, /Additional context from me: focus on section 2/);
 });
 
+test("/apply expands to the plan-first tailoring instruction", () => {
+  const exp = expandSlashCommand("/apply");
+  assert.ok(exp);
+  assert.equal(exp.display, "/apply");
+  assert.match(exp.prompt, /fetch_url/);
+  assert.match(exp.prompt, /ats_check/);
+  assert.match(exp.prompt, /do NOT call edit_document/);
+  assert.match(exp.prompt, /NUMBERED improvement plan/);
+});
+
+test("/apply labels its trailing text as the job posting", () => {
+  const exp = expandSlashCommand("/apply https://example.com/job/123");
+  assert.ok(exp);
+  assert.equal(exp.display, "/apply https://example.com/job/123");
+  assert.match(
+    exp.prompt,
+    /Job posting \(URL or pasted job description\): https:\/\/example\.com\/job\/123/,
+  );
+  assert.doesNotMatch(exp.prompt, /Additional context from me/);
+});
+
 test("unknown commands and plain text pass through as null", () => {
   assert.equal(expandSlashCommand("/unknown-cmd"), null);
   assert.equal(expandSlashCommand("fix the intro"), null);
@@ -25,6 +46,9 @@ test("unknown commands and plain text pass through as null", () => {
 
 test("matchSlashCommands offers commands while the name is being typed", () => {
   assert.ok(matchSlashCommands("/").some((c) => c.name === "check-bibtex"));
+  assert.ok(matchSlashCommands("/").some((c) => c.name === "apply"));
+  assert.equal(matchSlashCommands("/ap").length, 1);
+  assert.equal(matchSlashCommands("/ap")[0].name, "apply");
   assert.equal(matchSlashCommands("/che").length, 1);
   assert.equal(matchSlashCommands("/CHE").length, 1);
   assert.equal(matchSlashCommands("/check-bibtex").length, 1);

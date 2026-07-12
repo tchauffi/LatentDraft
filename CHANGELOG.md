@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`/check-bibtex`** chat command + `check_bibtex` agent tool: verifies references locally (every `\cite` key resolves to a `.bib` entry / `\bibitem`; unused entries; missing `\bibliography` targets) **and against the real world** — Crossref DOI lookup, arXiv ids, and Crossref title search catch hallucinated references (fabricated papers, fake or mismatched DOIs). Network failures report as "could not check", never as fabricated. Optional `CROSSREF_MAILTO` env var for Crossref's polite pool.
 - **Slash-command autocomplete** in the chat composer: type `/` for a menu of commands (registry-based, ready for more).
 - **End-of-turn bibliography recheck**: like the compile verification, `check_bibtex` re-runs automatically when the agent edited files after checking, so bibliography fixes can't end the turn unverified.
+- **`/apply`** chat command: tailor the resume to a job posting (URL or pasted text) — the agent fetches the posting, runs the ATS analysis against it, and replies with a review plus a **numbered improvement plan**; it only edits after you approve, then re-verifies keyword coverage with `ats_check`.
+- **`fetch_url`** agent tool: fetch any web page's readable text (HTML → text conversion, entity decoding, 18k-char cap, graceful handling of login walls and non-text content).
 
 ## [0.1.0] - 2026-07-12
 

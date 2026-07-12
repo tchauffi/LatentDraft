@@ -18,6 +18,7 @@ const KNOWN = new Set([
   "run_python",
   "view_pdf",
   "ats_check",
+  "fetch_url",
 ]);
 
 /** Run the filter over the input in chunks and return the outcome. */
@@ -130,6 +131,30 @@ test("normalizeToolName maps hallucinated names onto real tools", () => {
   assert.equal(normalizeToolName("Edit_Document", KNOWN), "edit_document");
   assert.equal(normalizeToolName("compile", KNOWN), "compile_check");
   assert.equal(normalizeToolName("nonsense_zzz", KNOWN), undefined);
+});
+
+test("normalizeToolName routes fetch-style aliases to fetch_url, not web_search", () => {
+  assert.equal(normalizeToolName("fetch_page", KNOWN), "fetch_url");
+  assert.equal(normalizeToolName("open_url", KNOWN), "fetch_url");
+  assert.equal(normalizeToolName("get_url", KNOWN), "fetch_url");
+  assert.equal(normalizeToolName("web_fetch", KNOWN), "fetch_url");
+  assert.equal(normalizeToolName("scrape_website", KNOWN), "fetch_url");
+  // Search-style names still land on web_search.
+  assert.equal(normalizeToolName("google_search", KNOWN), "web_search");
+  assert.equal(normalizeToolName("browse", KNOWN), "web_search");
+});
+
+test("normalizeToolArgs maps aliased fetch_url keys onto url", () => {
+  assert.deepEqual(normalizeToolArgs("fetch_url", { link: "https://x" }), { url: "https://x" });
+  assert.deepEqual(normalizeToolArgs("fetch_url", { href: "https://y" }), { url: "https://y" });
+  assert.deepEqual(normalizeToolArgs("fetch_url", { nope: 1 }), {});
+});
+
+test("recovers fetch_url(\"url\") text-form calls via the primary argument", () => {
+  const { calls } = filterAll('fetch_url("https://example.com/job")', 4);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "fetch_url");
+  assert.deepEqual(calls[0].args, { url: "https://example.com/job" });
 });
 
 test("normalizeToolArgs keeps canonical keys as-is", () => {
