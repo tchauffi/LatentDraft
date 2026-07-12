@@ -3,11 +3,11 @@
 [![CI](https://github.com/tchauffi/LatentDraft/actions/workflows/ci.yml/badge.svg)](https://github.com/tchauffi/LatentDraft/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
-A local Overleaf boosted by agents. Three panes:
+A local latex editor boosted by agents. Three panes:
 
 - **Editor** — multi-file LaTeX source (CodeMirror) with autocomplete (`\cite{`/`\ref{` keys extracted from your project), inline compile-error squiggles, and SyncTeX (Ctrl/Cmd+click a source line to jump the PDF; double-click the PDF to jump to the source)
 - **Preview** — the compiled PDF, live-updating as you type
-- **Chat** — an AI agent that reads and edits **any project file** (proposed as accept/reject diffs), creates files, generates figures, and can auto-fix compile failures
+- **Chat** — an AI agent that reads and edits **any project file** (proposed as accept/reject diffs), creates files, generates figures, and can auto-fix compile failures. Slash commands (type `/` for autocomplete): `/check-bibtex` verifies your references — including that the cited papers actually exist
 
 **Projects are plain folders** under `~/LatentDraft` (or `PROJECTS_ROOT`): normal `.tex`/`.bib`/figure files you can `git init`, edit with other tools, or drop an existing paper into. Everything autosaves; build artifacts stay out of the way in `.latentdraft/` (gitignored automatically). New projects start from a template gallery (article, beamer, CV).
 
@@ -83,6 +83,7 @@ The server reads these at startup (plain environment variables — there is no `
 | `PYTHON_BIN`        | `server/.venv/bin/python` | Interpreter for `run_python`/`view_pdf`/`ats_check` |
 | `TAVILY_API_KEY`    | —                        | Use Tavily for `web_search` (else Brave, else DuckDuckGo) |
 | `BRAVE_API_KEY`     | —                        | Use the Brave Search API for `web_search`            |
+| `CROSSREF_MAILTO`   | —                        | Contact email sent with `check_bibtex`'s Crossref lookups — opts into their [polite pool](https://api.crossref.org/swagger-ui/index.html), which is far less likely to rate-limit |
 
 Example — add OpenAI alongside Ollama:
 
@@ -105,6 +106,7 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - **Data import**: the *"+ Add data file"* button under the file tree uploads a CSV/Excel/image into the compile session — the agent can then `pd.read_csv`/`pd.read_excel` it in `run_python` and plot it with seaborn.
 - `view_pdf()` — compiles and **inspects the PDF's actual layout**, returning a text report the model can act on: page count/paper size, per-page text coverage and margins, content clipped at page edges, Overfull `\hbox` lines with `main.tex` line numbers, near-empty trailing pages, and font usage. This is how text-only local models "see" the result; vision-capable models additionally get the rendered page images.
 - `ats_check(job_description?)` — extracts the compiled PDF's text and reports ATS parseability, contact/section coverage, and keyword match against a posting.
+- `check_bibtex(verify_online?)` — verifies the bibliography, no compile needed. Locally: every `\cite`-style key must resolve to a `.bib` entry or `\bibitem`, unused entries and missing `\bibliography` targets are flagged, each problem quoted at its source line. Online (the interesting part): every **cited** entry is checked against **Crossref** (does the DOI exist, and does it resolve to the *claimed* paper?), **arXiv** ids, and a Crossref title search — catching **hallucinated references**, the fake-but-plausible papers and DOIs LLMs love to invent. Verdicts are conservative: a network failure reports as "could not check", never as fabricated. Type `/check-bibtex` in the chat to run the whole workflow; like compiles, the bibliography is **re-checked at the end of the turn** if the agent edited files after checking, so fixes can't go unverified.
 
 Only `edit_document` changes your document, and every edit is yours to accept or reject.
 

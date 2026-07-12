@@ -47,6 +47,11 @@ export interface ChatRequest {
 // of steps mid-research and never writes the document.
 const MAX_STEPS = 24;
 const MAX_CORRECTIVE_ROUNDS = 5;
+// End-of-turn bibliography recheck: when the agent used check_bibtex and then
+// edited files, verify the fixes actually resolved the findings. Kept low —
+// a genuinely unfixable reference (fabricated, user must decide) should be
+// explained, not retried forever.
+const MAX_BIB_RECHECK_ROUNDS = 2;
 // Extra rounds granted when the model writes tool calls as TEXT instead of
 // using native function calling (common with small local models): each round
 // executes the recovered calls and feeds the results back so the model can
@@ -356,6 +361,32 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
             `The document currently FAILS to compile with this error:\n\n${check.log}\n\n` +
             `Make the minimal edit_document changes needed to fix it, then compile_check until it succeeds. ` +
             `Use read_document first if you need to see the current state of the document.`,
+        },
+      ]);
+    }
+
+    // Same enforcement for the bibliography: if check_bibtex was part of this
+    // turn and the agent edited files, recheck the references before ending.
+    let prevBibReport: string | undefined;
+    for (let round = 0; round <= MAX_BIB_RECHECK_ROUNDS; round++) {
+      if (abort.signal.aborted) break;
+      const bib = await agentTools.finalizeBib();
+      if (!bib || bib.ok) break;
+      // The agent stopped without further edits (it chose to flag instead of
+      // fix, or already explained) — don't nag it with the same report again.
+      if (bib.report === prevBibReport) break;
+      prevBibReport = bib.report;
+      if (round === MAX_BIB_RECHECK_ROUNDS) break;
+      write({ type: "text", text: "\n\n_Rechecking references after the edits…_\n\n" });
+      await runAgentTurn([
+        {
+          role: "user",
+          content:
+            `check_bibtex re-ran after your edits and STILL reports problems:\n\n${bib.report}\n\n` +
+            `Fix what can be fixed (correct keys via the quoted lines; correct .bib fields only ` +
+            `with real data confirmed via web_search). If a reference genuinely cannot be ` +
+            `verified or replaced, leave it unchanged and clearly tell the user instead of ` +
+            `guessing. NEVER invent bibliographic data.`,
         },
       ]);
     }

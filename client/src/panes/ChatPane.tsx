@@ -19,6 +19,7 @@ import {
   stripLatexDocBlock,
   type ApplyResult,
 } from "../lib/diff";
+import { expandSlashCommand, matchSlashCommands } from "../lib/slashCommands";
 
 interface EditCard extends ProposedEdit {
   status: "pending" | "applied" | "rejected" | "failed";
@@ -29,6 +30,8 @@ interface UIMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** What the user literally typed, when a slash command expanded `content`. */
+  display?: string;
   edits: EditCard[];
   /** Non-edit tool activity this turn (search, python, pdf, ats), in order. */
   activity: ToolActivity[];
@@ -136,6 +139,15 @@ export default function ChatPane({
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  // Slash-command autocomplete: open while the input is a partial /name.
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const slashMatches = streaming || slashDismissed ? [] : matchSlashCommands(input);
+  const slashSel = Math.min(slashIndex, Math.max(0, slashMatches.length - 1));
+  function pickSlashCommand(name: string) {
+    setInput(`/${name} `);
+    setSlashIndex(0);
+  }
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   /** Set once this project's history has loaded — saves are held until then. */
@@ -247,11 +259,24 @@ export default function ChatPane({
   }
 
   async function send(textOverride?: string) {
-    const text = (textOverride ?? input).trim();
-    if (!text || streaming || !provider || !model) return;
+    const raw = (textOverride ?? input).trim();
+    if (!raw || streaming || !provider || !model) return;
     setInput("");
 
-    const userMsg: UIMessage = { id: nextId(), role: "user", content: text, edits: [], activity: [] };
+    // Slash commands (/check-bibtex …) expand into a full instruction: the
+    // expanded prompt is the message content (history is rebuilt from content
+    // every turn), the raw command is kept for the bubble.
+    const expanded = expandSlashCommand(raw);
+    const text = expanded?.prompt ?? raw;
+
+    const userMsg: UIMessage = {
+      id: nextId(),
+      role: "user",
+      content: text,
+      ...(expanded ? { display: expanded.display } : {}),
+      edits: [],
+      activity: [],
+    };
     const assistantId = nextId();
     const assistantMsg: UIMessage = {
       id: assistantId,
@@ -468,7 +493,7 @@ export default function ChatPane({
         {messages.map((m) => (
           <div key={m.id} className={`msg msg-${m.role}`}>
             {m.role === "user" ? (
-              <div className="msg-user-bubble">{m.content}</div>
+              <div className="msg-user-bubble">{m.display ?? m.content}</div>
             ) : (
               <div className="msg-assistant-row">
                 <div className="msg-avatar">
@@ -522,6 +547,28 @@ export default function ChatPane({
 
       <div className="composer">
         <div className="composer-box">
+          {slashMatches.length > 0 && (
+            <div className="slash-menu" role="listbox">
+              {slashMatches.map((c, i) => (
+                <button
+                  key={c.name}
+                  type="button"
+                  role="option"
+                  aria-selected={i === slashSel}
+                  className={`slash-item${i === slashSel ? " slash-item-active" : ""}`}
+                  // onMouseDown so the textarea keeps focus (click fires after blur).
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    pickSlashCommand(c.name);
+                  }}
+                  onMouseEnter={() => setSlashIndex(i)}
+                >
+                  <span className="slash-name">/{c.name}</span>
+                  <span className="slash-desc">{c.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <div
             className="composer-chips"
             title="Files the agent sees: it edits main.tex; the rest resolve in its compiles"
@@ -549,9 +596,34 @@ export default function ChatPane({
           </div>
           <textarea
             value={input}
-            placeholder={streaming ? "Streaming…" : "Ask the agent to edit, explain, or fix your LaTeX…"}
-            onChange={(e) => setInput(e.target.value)}
+            placeholder={
+              streaming
+                ? "Streaming…"
+                : "Ask the agent to edit, explain, or fix your LaTeX… (/check-bibtex verifies references)"
+            }
+            onChange={(e) => {
+              setInput(e.target.value);
+              setSlashDismissed(false);
+            }}
             onKeyDown={(e) => {
+              if (slashMatches.length > 0) {
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  const d = e.key === "ArrowDown" ? 1 : -1;
+                  setSlashIndex((slashSel + d + slashMatches.length) % slashMatches.length);
+                  return;
+                }
+                if (e.key === "Enter" || e.key === "Tab") {
+                  e.preventDefault();
+                  pickSlashCommand(slashMatches[slashSel].name);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setSlashDismissed(true);
+                  return;
+                }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send();
@@ -629,6 +701,7 @@ const TOOL_ICON: Record<string, string> = {
   run_python: "🐍",
   view_pdf: "👁️",
   ats_check: "📋",
+  check_bibtex: "📚",
 };
 
 function ActivityList({ activity }: { activity: ToolActivity[] }) {

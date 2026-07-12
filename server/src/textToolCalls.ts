@@ -29,6 +29,7 @@ export function normalizeToolName(raw: string, known: ReadonlySet<string>): stri
   if (/pdf|preview|render|screenshot|look/.test(name)) return has("view_pdf");
   if (/read|show|cat|inspect/.test(name)) return has("read_document");
   if (/edit|write|replace|update|modify|insert|patch|apply|create|compose/.test(name)) return has("edit_document");
+  if (/bib|cit/.test(name)) return has("check_bibtex");
   if (/compile|build|check|verify/.test(name)) return has("compile_check");
   if (/python|execute|run_|script|calc/.test(name)) return has("run_python");
   if (/search|google|browse|bing|duckduck|web|lookup/.test(name)) return has("web_search");

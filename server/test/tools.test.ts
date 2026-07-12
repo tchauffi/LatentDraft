@@ -278,3 +278,100 @@ test("project mode: compile_check compiles a mirror with working edits, real fil
   assert.match(await readFile(path.join(dir, "sections/body.tex"), "utf8"), /badmacroX/);
   await assert.rejects(access(path.join(dir, "main.pdf")));
 });
+
+test("project mode: check_bibtex reports missing keys from working copies, offline", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-e`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const doc = "\\documentclass{article}\\begin{document}\\cite{ghost2024} \\cite{real}\\end{document}";
+  await writeFile(path.join(dir, "main.tex"), doc);
+  await writeFile(path.join(dir, "refs.bib"), "@misc{real, title={A Real Paper}}\n");
+
+  const toolEvents: { name: string; summary: string; ok: boolean }[] = [];
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-bib-test",
+    projectDir: dir,
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => toolEvents.push(e),
+  });
+
+  const report = String(await exec(agent.tools.check_bibtex, { verify_online: false }));
+  assert.match(report, /ghost2024/);
+  assert.match(report, /> 1: .*\\cite\{ghost2024\}/);
+  assert.doesNotMatch(report, /External verification/, "verify_online: false must stay offline");
+  assert.equal(toolEvents.length, 1);
+  assert.equal(toolEvents[0].name, "check_bibtex");
+  assert.equal(toolEvents[0].ok, false);
+  assert.match(toolEvents[0].summary, /1 unresolved/);
+
+  // A working-copy edit (not yet on disk) is what gets checked.
+  await exec(agent.tools.edit_document, {
+    explanation: "fix key",
+    old_string: "\\cite{ghost2024}",
+    new_string: "\\cite{real}",
+  });
+  const after = String(await exec(agent.tools.check_bibtex, { verify_online: false }));
+  assert.match(after, /✅ All 1 citation key\(s\) resolve/);
+});
+
+test("finalizeBib rechecks the bibliography after edits, offline", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-f`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const doc = "\\documentclass{article}\\begin{document}\\cite{ghost}\\end{document}";
+  await writeFile(path.join(dir, "main.tex"), doc);
+  await writeFile(path.join(dir, "refs.bib"), "@misc{real, title={R}}\n");
+
+  const toolEvents: { name: string; summary: string; ok: boolean }[] = [];
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-bibfin-test",
+    projectDir: dir,
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => toolEvents.push(e),
+  });
+
+  // check_bibtex never ran → no recheck.
+  assert.equal(await agent.finalizeBib(), undefined);
+
+  // Failing check, then a fixing edit → recheck re-runs and passes.
+  await exec(agent.tools.check_bibtex, { verify_online: false });
+  await exec(agent.tools.edit_document, {
+    explanation: "fix key",
+    old_string: "\\cite{ghost}",
+    new_string: "\\cite{real}",
+  });
+  const rechecked = await agent.finalizeBib();
+  assert.ok(rechecked);
+  assert.equal(rechecked.ok, true);
+  assert.match(rechecked.summary, /All 1 citation/);
+  assert.equal(toolEvents.filter((e) => e.name === "check_bibtex").length, 2);
+
+  // Nothing changed since → same result returned, no third tool event.
+  const again = await agent.finalizeBib();
+  assert.equal(again, rechecked);
+  assert.equal(toolEvents.filter((e) => e.name === "check_bibtex").length, 2);
+});
+
+test("finalizeBib stays inactive when the agent edited without ever checking", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-g`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, "main.tex"), "hello \\cite{nope}");
+  const agent = createAgentTools({
+    initialDoc: "hello \\cite{nope}",
+    compileSessionId: "tools-bibfin2-test",
+    projectDir: dir,
+    emitEdit: () => {},
+    emitCheck: () => {},
+  });
+  await exec(agent.tools.edit_document, {
+    explanation: "x",
+    old_string: "hello",
+    new_string: "hi",
+  });
+  assert.equal(await agent.finalizeBib(), undefined);
+});
