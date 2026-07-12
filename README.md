@@ -106,10 +106,19 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - `render_mermaid(code, filename?)` — renders a Mermaid diagram (flowchart, sequence, class, state, ER, gantt, pie, mindmap, …) to a print-quality PNG in the build dir, for conceptual/structural figures that would be awkward to draw in matplotlib.
 - **Data import**: the *"+ Add data file"* button under the file tree uploads a CSV/Excel/image into the compile session — the agent can then `pd.read_csv`/`pd.read_excel` it in `run_python` and plot it with seaborn.
 - `view_pdf()` — compiles and **inspects the PDF's actual layout**, returning a text report the model can act on: page count/paper size, per-page text coverage and margins, content clipped at page edges, Overfull `\hbox` lines with `main.tex` line numbers, near-empty trailing pages, and font usage. This is how text-only local models "see" the result; vision-capable models additionally get the rendered page images.
-- `ats_check(job_description?)` — extracts the compiled PDF's text and reports ATS parseability, contact/section coverage, and keyword match against a posting. Type `/apply <job-url>` (or `/apply` + a pasted posting) in the chat for the full tailoring workflow: the agent fetches the posting, reviews your resume against it, proposes a **numbered improvement plan**, and only starts editing after you approve — every edit still lands as an accept/reject card.
+- `ats_check(job_description?)` — extracts the compiled PDF's text and reports ATS parseability, contact/section coverage, and keyword match against a posting.
 - `check_bibtex(verify_online?)` — verifies the bibliography, no compile needed. Locally: every `\cite`-style key must resolve to a `.bib` entry or `\bibitem`, unused entries and missing `\bibliography` targets are flagged, each problem quoted at its source line. Online (the interesting part): every **cited** entry is checked against **Crossref** (does the DOI exist, and does it resolve to the *claimed* paper?), **arXiv** ids, and a Crossref title search — catching **hallucinated references**, the fake-but-plausible papers and DOIs LLMs love to invent. Verdicts are conservative: a network failure reports as "could not check", never as fabricated. Type `/check-bibtex` in the chat to run the whole workflow; like compiles, the bibliography is **re-checked at the end of the turn** if the agent edited files after checking, so fixes can't go unverified.
 
 Only `edit_document` changes your document, and every edit is yours to accept or reject.
+
+### Slash commands
+
+Type `/` in the chat composer for an autocomplete menu of built-in workflows:
+
+- **`/apply <job-url>`** (or `/apply` + a pasted job description) — tailor your resume to a specific posting. The agent fetches the posting, reads your resume, and scores it with `ats_check` against the job description; then it replies with the role's key requirements, a strengths/gaps review, and a **numbered improvement plan** — *without touching your document*. Reply to approve the plan (or change it), and only then does the agent edit, recompile, and re-run `ats_check` to confirm the keyword coverage actually improved. It will never invent experience or skills to match the posting; if a posting is behind a login wall (LinkedIn often is), it asks you to paste the text instead of guessing. Works best with a mid-size model or better — very small local models can struggle to hold the plan-first discipline.
+- **`/check-bibtex`** — verify your references, including that the cited papers actually exist (see `check_bibtex` above).
+
+The chat bubble shows the command you typed; the agent receives the full workflow instruction behind it.
 
 So a typical turn is: **edit → compile_check → (if it fails) read the log, fix, compile_check again → summarize.** This means the changes it proposes are **verified to compile** before you ever see them. When the turn ends you get a green *"✓ Verified — the document compiles with these changes"* banner (or a red one with the log if it couldn't).
 
