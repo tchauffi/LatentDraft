@@ -1,4 +1,5 @@
 import express from "express";
+import os from "node:os";
 import {
   cleanupStaleSessions,
   compileProject,
@@ -6,12 +7,18 @@ import {
 import {
   listProjects,
   createProject,
+  renameProject,
+  duplicateProject,
+  deleteProject,
   listProjectFiles,
   readProjectFile,
   writeProjectFile,
   renameProjectFile,
   deleteProjectFile,
+  readProjectChat,
+  writeProjectChat,
   projectDir,
+  PROJECTS_ROOT,
 } from "./projects.js";
 import { TEMPLATES } from "./templates.js";
 import { loadProjectSyncTex, forwardSearch, reverseSearch } from "./synctex.js";
@@ -57,8 +64,14 @@ app.get("/api/providers", async (_req, res) => {
 
 /* ---- Projects: plain directories under PROJECTS_ROOT ---- */
 
+/** Where projects live on disk, with the home dir shortened for display. */
+function displayRoot(): string {
+  const home = os.homedir();
+  return PROJECTS_ROOT.startsWith(home) ? `~${PROJECTS_ROOT.slice(home.length)}` : PROJECTS_ROOT;
+}
+
 app.get("/api/projects", async (_req, res) => {
-  res.json({ projects: await listProjects(), templates: Object.keys(TEMPLATES) });
+  res.json({ projects: await listProjects(), templates: Object.keys(TEMPLATES), root: displayRoot() });
 });
 
 app.post("/api/projects", async (req, res) => {
@@ -70,6 +83,31 @@ app.post("/api/projects", async (req, res) => {
   const result = await createProject(name, typeof template === "string" ? template : undefined);
   if ("error" in result) res.status(400).json(result);
   else res.json(result);
+});
+
+/** Rename a project (its directory). Body: { name } — the new display name. */
+app.patch("/api/projects/:id", async (req, res) => {
+  const { name } = req.body ?? {};
+  if (typeof name !== "string" || !name.trim()) {
+    res.status(400).json({ error: "Expected { name }." });
+    return;
+  }
+  const result = await renameProject(req.params.id, name);
+  if ("error" in result) res.status(400).json(result);
+  else res.json(result);
+});
+
+/** Copy a project's sources into a fresh "<id> copy" directory. */
+app.post("/api/projects/:id/duplicate", async (req, res) => {
+  const result = await duplicateProject(req.params.id);
+  if ("error" in result) res.status(400).json(result);
+  else res.json(result);
+});
+
+app.delete("/api/projects/:id", async (req, res) => {
+  const result = await deleteProject(req.params.id);
+  if (result.ok) res.json({ ok: true });
+  else res.status(400).json({ error: result.error });
 });
 
 app.get("/api/projects/:id/files", async (req, res) => {
@@ -128,6 +166,25 @@ app.post("/api/projects/:id/rename", async (req, res) => {
 app.delete("/api/projects/:id/file", async (req, res) => {
   const rel = typeof req.query.path === "string" ? req.query.path : "";
   const result = await deleteProjectFile(req.params.id, rel);
+  if (result.ok) res.json({ ok: true });
+  else res.status(400).json({ error: result.error });
+});
+
+/* ---- Per-project chat history (.latentdraft/chat.json) ---- */
+
+app.get("/api/projects/:id/chat", async (req, res) => {
+  const messages = await readProjectChat(req.params.id);
+  if (!messages) res.status(404).json({ error: "Project not found." });
+  else res.json({ messages });
+});
+
+app.put("/api/projects/:id/chat", async (req, res) => {
+  const { messages } = req.body ?? {};
+  if (!Array.isArray(messages)) {
+    res.status(400).json({ error: "Expected { messages: [...] }." });
+    return;
+  }
+  const result = await writeProjectChat(req.params.id, messages);
   if (result.ok) res.json({ ok: true });
   else res.status(400).json({ error: result.error });
 });

@@ -3,6 +3,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   fetchProviders,
+  fetchProjectChat,
+  saveProjectChat,
   streamChat,
   type CheckResult,
   type ProviderInfo,
@@ -69,6 +71,26 @@ interface Props {
 let idSeq = 0;
 const nextId = () => `m${++idSeq}`;
 
+/* ---- Per-project chat history, persisted server-side in the project's
+   .latentdraft/chat.json (it travels with the folder on rename and dies with
+   it on delete). The pane is remounted with a project-keyed `key`, so each
+   mount hydrates one project's conversation and saves back on change. ---- */
+const CHAT_LIMIT = 40; // messages kept per project — bounds chat.json growth
+
+/** Make hydrated messages safe to resume: fresh ids won't collide, and stale
+ * pending edits don't resurrect as live inline suggestions. */
+function reviveChat(msgs: UIMessage[]): UIMessage[] {
+  for (const m of msgs) {
+    const n = Number(m.id.slice(1));
+    if (Number.isFinite(n) && n > idSeq) idSeq = n;
+    m.edits = (m.edits ?? []).map((e) =>
+      e.status === "pending" ? { ...e, status: "rejected" as const } : e,
+    );
+    m.activity = m.activity ?? [];
+  }
+  return msgs;
+}
+
 function Sparkle({ size = 12, fill = "#fff" }: { size?: number; fill?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill={fill}>
@@ -93,25 +115,75 @@ export default function ChatPane({
   onTurnEnd,
   generatedFiles,
 }: Props) {
-  const [autoFix, setAutoFix] = useState(false);
+  // UI preferences survive the per-project remount (and reloads) — they are
+  // browser-level settings, unlike the conversation, which is per-project.
+  const [autoFix, setAutoFix] = useState(() => localStorage.getItem("latentdraft:auto-fix") === "1");
+  // Auto-edit: apply the agent's edits the moment they stream in, instead of
+  // waiting for Accept/Reject. A ref so mid-stream toggles take effect.
+  const [autoEdit, setAutoEdit] = useState(() => localStorage.getItem("latentdraft:auto-edit") === "1");
+  const autoEditRef = useRef(autoEdit);
+  autoEditRef.current = autoEdit;
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [provider, setProvider] = useState<string>("");
-  const [model, setModel] = useState<string>("");
+  const [provider, setProvider] = useState<string>(() => localStorage.getItem("latentdraft:provider") ?? "");
+  const [model, setModel] = useState<string>(() => localStorage.getItem("latentdraft:model") ?? "");
+
+  useEffect(() => {
+    localStorage.setItem("latentdraft:auto-fix", autoFix ? "1" : "0");
+    localStorage.setItem("latentdraft:auto-edit", autoEdit ? "1" : "0");
+    if (provider) localStorage.setItem("latentdraft:provider", provider);
+    if (model) localStorage.setItem("latentdraft:model", model);
+  }, [autoFix, autoEdit, provider, model]);
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** Set once this project's history has loaded — saves are held until then. */
+  const hydratedRef = useRef(false);
+  const messagesRef = useRef<UIMessage[]>([]);
+
+  // Hydrate this project's conversation; the pane is keyed by project, so a
+  // switch remounts it (aborting any in-flight stream via the cleanup below).
+  useEffect(() => {
+    let cancelled = false;
+    if (!projectId) {
+      hydratedRef.current = true;
+      return;
+    }
+    void fetchProjectChat<UIMessage>(projectId).then((msgs) => {
+      if (cancelled) return;
+      hydratedRef.current = true;
+      if (msgs.length > 0) setMessages(reviveChat(msgs));
+    });
+    return () => {
+      cancelled = true;
+      abortRef.current?.abort();
+      // Unmount = project switch: flush what the debounced save hasn't yet.
+      if (projectId && hydratedRef.current) {
+        void saveProjectChat(projectId, messagesRef.current.slice(-CHAT_LIMIT));
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist on change (debounced — streams update messages on every token).
+  useEffect(() => {
+    messagesRef.current = messages;
+    if (!projectId || !hydratedRef.current) return;
+    const t = setTimeout(() => void saveProjectChat(projectId, messages.slice(-CHAT_LIMIT)), 800);
+    return () => clearTimeout(t);
+  }, [messages, projectId]);
 
   useEffect(() => {
     fetchProviders()
       .then((list) => {
         setProviders(list);
         const firstAvailable = list.find((p) => p.available && p.models.length > 0) ?? list[0];
-        if (firstAvailable) {
-          setProvider(firstAvailable.id);
-          setModel(firstAvailable.models[0] ?? "");
-        }
+        // Keep a restored selection when it's still valid; otherwise default.
+        setProvider((cur) =>
+          cur && list.some((p) => p.id === cur && p.available) ? cur : firstAvailable?.id ?? "",
+        );
+        setModel((cur) => cur || firstAvailable?.models[0] || "");
       })
       .catch(() => setProviders([]));
   }, []);
@@ -166,6 +238,14 @@ export default function ChatPane({
     setMessages((prev) => prev.map((m) => (m.id === id ? fn(m) : m)));
   }
 
+  /** Auto-edit mode: apply an incoming edit immediately and card it as such. */
+  function autoApply(edit: ProposedEdit): EditCard {
+    const result = applyEdit(edit);
+    return result.ok
+      ? { ...edit, status: "applied" }
+      : { ...edit, status: "failed", failReason: result.reason };
+  }
+
   async function send(textOverride?: string) {
     const text = (textOverride ?? input).trim();
     if (!text || streaming || !provider || !model) return;
@@ -208,13 +288,13 @@ export default function ChatPane({
       {
         onText: (t) =>
           updateMessage(assistantId, (m) => ({ ...m, content: m.content + t })),
-        onEdit: (edit) =>
-          updateMessage(assistantId, (m) => ({
-            ...m,
-            // Server edit ids restart at edit-1 every turn; prefix with the
-            // message id so ids stay unique across the whole conversation.
-            edits: [...m.edits, { ...edit, id: `${assistantId}:${edit.id}`, status: "pending" }],
-          })),
+        onEdit: (edit) => {
+          // Server edit ids restart at edit-1 every turn; prefix with the
+          // message id so ids stay unique across the whole conversation.
+          const prefixed = { ...edit, id: `${assistantId}:${edit.id}` };
+          const card = autoEditRef.current ? autoApply(prefixed) : ({ ...prefixed, status: "pending" } as EditCard);
+          updateMessage(assistantId, (m) => ({ ...m, edits: [...m.edits, card] }));
+        },
         onCheck: (check) => updateMessage(assistantId, (m) => ({ ...m, check })),
         onTool: (tool) =>
           updateMessage(assistantId, (m) => ({ ...m, activity: [...m.activity, tool] })),
@@ -226,7 +306,9 @@ export default function ChatPane({
             const parsed = parseLatexEditBlocks(m.content);
             const extra: EditCard[] = parsed
               .filter((p) => !m.edits.some((e) => e.old_string === p.old_string))
-              .map((p) => ({ ...p, status: "pending" as const }));
+              .map((p) =>
+                autoEditRef.current ? autoApply(p) : { ...p, status: "pending" as const },
+              );
 
             let content = stripLatexEditBlocks(m.content);
             const edits = [...m.edits, ...extra];
@@ -360,17 +442,6 @@ export default function ChatPane({
           </select>
         </div>
         <div className="toolbar-spacer" />
-        <label
-          className={`autofix-toggle${autoFix ? " autofix-on" : ""}`}
-          title="When a compile fails, automatically ask the agent to fix it"
-        >
-          <input
-            type="checkbox"
-            checked={autoFix}
-            onChange={(e) => setAutoFix(e.target.checked)}
-          />
-          auto-fix
-        </label>
         <button
           className="agent-icon-btn"
           title="New chat"
@@ -490,7 +561,28 @@ export default function ChatPane({
             disabled={streaming}
           />
           <div className="composer-actions">
-            <span className="composer-hint mono">Agent · edits files</span>
+            <label
+              className={`autofix-toggle${autoEdit ? " autofix-on" : ""}`}
+              title="Apply the agent's edits the moment they arrive — no Accept/Reject step (full-document rewrites still ask)"
+            >
+              <input
+                type="checkbox"
+                checked={autoEdit}
+                onChange={(e) => setAutoEdit(e.target.checked)}
+              />
+              auto-edit
+            </label>
+            <label
+              className={`autofix-toggle${autoFix ? " autofix-on" : ""}`}
+              title="When a compile fails, automatically ask the agent to fix it"
+            >
+              <input
+                type="checkbox"
+                checked={autoFix}
+                onChange={(e) => setAutoFix(e.target.checked)}
+              />
+              auto-fix
+            </label>
             <span
               className={`composer-hint mono ctx-info ctx-${ctxSeverity}`}
               title={

@@ -33,6 +33,8 @@ export type CompileResult =
 export interface ProjectInfo {
   id: string;
   mtimeMs: number;
+  /** Document title from main.tex's \title{…}, when one is set. */
+  title?: string;
 }
 
 export interface ProjectFileInfo {
@@ -42,10 +44,17 @@ export interface ProjectFileInfo {
   binary: boolean;
 }
 
-export async function fetchProjects(): Promise<{ projects: ProjectInfo[]; templates: string[] }> {
+export interface ProjectsResponse {
+  projects: ProjectInfo[];
+  templates: string[];
+  /** Where projects live on the server's disk, for display (e.g. ~/LatentDraft). */
+  root: string;
+}
+
+export async function fetchProjects(): Promise<ProjectsResponse> {
   const res = await fetch("/api/projects");
   if (!res.ok) throw new Error(`projects: ${res.status}`);
-  return (await res.json()) as { projects: ProjectInfo[]; templates: string[] };
+  return (await res.json()) as ProjectsResponse;
 }
 
 export async function createProjectApi(
@@ -58,6 +67,34 @@ export async function createProjectApi(
     body: JSON.stringify({ name, template }),
   });
   return (await res.json()) as { id: string } | { error: string };
+}
+
+/** Rename a project directory; returns the new (slugified) id. */
+export async function renameProjectApi(
+  id: string,
+  name: string,
+): Promise<{ id: string } | { error: string }> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return (await res.json()) as { id: string } | { error: string };
+}
+
+/** Copy a project's sources into a fresh "<id> copy" project. */
+export async function duplicateProjectApi(
+  id: string,
+): Promise<{ id: string } | { error: string }> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/duplicate`, { method: "POST" });
+  return (await res.json()) as { id: string } | { error: string };
+}
+
+/** Delete a whole project directory from disk. */
+export async function deleteProjectApi(id: string): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error };
 }
 
 export async function fetchProjectFiles(id: string): Promise<ProjectFileInfo[]> {
@@ -137,6 +174,28 @@ export async function deleteProjectFileApi(
   });
   const data = (await res.json().catch(() => ({}))) as { error?: string };
   return res.ok ? { ok: true } : { ok: false, error: data.error };
+}
+
+/* ---- Per-project chat history (.latentdraft/chat.json on the server) ---- */
+
+export async function fetchProjectChat<T>(id: string): Promise<T[]> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/chat`);
+  if (!res.ok) return [];
+  const data = (await res.json()) as { messages?: T[] };
+  return Array.isArray(data.messages) ? data.messages : [];
+}
+
+/** Best-effort save — chat history is a convenience, never worth blocking on. */
+export async function saveProjectChat(id: string, messages: unknown[]): Promise<void> {
+  try {
+    await fetch(`/api/projects/${encodeURIComponent(id)}/chat`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages }),
+    });
+  } catch {
+    /* offline or racing a delete — drop it */
+  }
 }
 
 /** SyncTeX forward: source position → PDF position (pt, top-left origin). */

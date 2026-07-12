@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile, stat, rm, rename } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, writeFile, stat, rm, rename } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { safeRelPath } from "./compile.js";
@@ -28,6 +28,8 @@ export interface ProjectInfo {
   id: string;
   /** Directory mtime — a cheap "last touched" for sorting the switcher. */
   mtimeMs: number;
+  /** Document title from main.tex's \title{…}, when one is set. */
+  title?: string;
 }
 
 export interface ProjectFileInfo {
@@ -72,6 +74,23 @@ export function safeProjectFilePath(rel: string): string | undefined {
   return norm;
 }
 
+/**
+ * Pull the document title out of a main.tex preamble. One level of nested
+ * braces is enough for real titles; formatting commands are stripped for
+ * display. Returns undefined when there's no usable title.
+ */
+export function extractTexTitle(tex: string): string | undefined {
+  const m = tex.match(/\\title\s*(?:\[[^\]]*\])?\s*\{((?:[^{}]|\{[^{}]*\})*)\}/);
+  if (!m) return undefined;
+  const title = m[1]
+    .replace(/\\\\/g, " ")
+    .replace(/\\[a-zA-Z@]+\*?\s*/g, "")
+    .replace(/[{}~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return title || undefined;
+}
+
 export async function listProjects(): Promise<ProjectInfo[]> {
   let names: string[];
   try {
@@ -84,12 +103,140 @@ export async function listProjects(): Promise<ProjectInfo[]> {
     if (!safeProjectId(name)) continue;
     try {
       const st = await stat(path.join(PROJECTS_ROOT, name));
-      if (st.isDirectory()) projects.push({ id: name, mtimeMs: st.mtimeMs });
+      if (!st.isDirectory()) continue;
+      let title: string | undefined;
+      try {
+        const main = await readFile(path.join(PROJECTS_ROOT, name, "main.tex"), "utf8");
+        title = extractTexTitle(main);
+      } catch {
+        /* no main.tex — the id is the only name */
+      }
+      projects.push({ id: name, mtimeMs: st.mtimeMs, title });
     } catch {
       /* raced */
     }
   }
   return projects.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+/**
+ * Rename a project DIRECTORY. The new name goes through the same slugify as
+ * creation; renaming onto an existing project is refused.
+ */
+export async function renameProject(
+  id: string,
+  newName: string,
+): Promise<{ id: string } | { error: string }> {
+  const from = projectDir(id);
+  if (!from) return { error: "Invalid project." };
+  const newId = slugifyProjectName(newName);
+  if (!newId) return { error: "Project names need at least one letter or digit." };
+  if (newId === id) return { id };
+  const to = path.join(PROJECTS_ROOT, newId);
+  try {
+    await stat(to);
+    return { error: `A project named '${newId}' already exists.` };
+  } catch {
+    /* target free */
+  }
+  try {
+    await rename(from, to);
+    return { id: newId };
+  } catch (err) {
+    return { error: String(err) };
+  }
+}
+
+/**
+ * Copy a project into "<id> copy" (then "<id> copy 2", …). Build artifacts
+ * and git history stay behind — the copy is a fresh draft of the sources.
+ */
+export async function duplicateProject(
+  id: string,
+): Promise<{ id: string } | { error: string }> {
+  const src = projectDir(id);
+  if (!src) return { error: "Invalid project." };
+  try {
+    if (!(await stat(src)).isDirectory()) return { error: "Project not found." };
+  } catch {
+    return { error: "Project not found." };
+  }
+  for (let n = 1; n <= 99; n++) {
+    const newId = slugifyProjectName(n === 1 ? `${id} copy` : `${id} copy ${n}`);
+    if (!newId || newId === id) return { error: "Could not derive a name for the copy." };
+    const dest = path.join(PROJECTS_ROOT, newId);
+    try {
+      await mkdir(dest, { recursive: false }); // claims the name atomically
+    } catch {
+      continue; // taken — try the next suffix
+    }
+    await cp(src, dest, {
+      recursive: true,
+      filter: (p) => p === src || !HIDDEN_DIRS.has(path.basename(p)),
+    });
+    return { id: newId };
+  }
+  return { error: "Too many copies of this project already exist." };
+}
+
+/* ---- Per-project chat history: .latentdraft/chat.json. Lives in the hidden
+   build dir, so it never shows in the file tree and travels with the folder
+   (rename) or dies with it (delete). ---- */
+
+export async function readProjectChat(id: string): Promise<unknown[] | undefined> {
+  const dir = projectDir(id);
+  if (!dir) return undefined;
+  try {
+    const raw = await readFile(path.join(dir, ".latentdraft", "chat.json"), "utf8");
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return []; // no history yet (or unreadable) — an empty conversation
+  }
+}
+
+export async function writeProjectChat(
+  id: string,
+  messages: unknown[],
+): Promise<{ ok: boolean; error?: string }> {
+  const dir = projectDir(id);
+  if (!dir) return { ok: false, error: "Invalid project." };
+  try {
+    if (!(await stat(dir)).isDirectory()) return { ok: false, error: "Project not found." };
+  } catch {
+    return { ok: false, error: "Project not found." };
+  }
+  try {
+    const target = path.join(dir, ".latentdraft", "chat.json");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, JSON.stringify(messages), "utf8");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/** Delete a whole project directory — build artifacts, .git and all. */
+export async function deleteProject(id: string): Promise<{ ok: boolean; error?: string }> {
+  const dir = projectDir(id);
+  if (!dir) return { ok: false, error: "Invalid project." };
+  try {
+    const st = await stat(dir);
+    if (!st.isDirectory()) return { ok: false, error: "Project not found." };
+  } catch {
+    return { ok: false, error: "Project not found." };
+  }
+  try {
+    await rm(dir, { recursive: true });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/** Escape LaTeX-special characters so a project name is safe in \title{…}. */
+function texEscape(s: string): string {
+  return s.replace(/([&%$#_{}])/g, "\\$1").replace(/~/g, "\\textasciitilde{}");
 }
 
 /**
@@ -120,7 +267,12 @@ export async function createProject(
   for (const [rel, content] of Object.entries(files)) {
     const target = path.join(dir, rel);
     await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, content, "utf8");
+    // Seed the document title with the project's name instead of a placeholder.
+    const seeded =
+      rel === "main.tex"
+        ? content.replace("\\title{Untitled}", `\\title{${texEscape(name.trim())}}`)
+        : content;
+    await writeFile(target, seeded, "utf8");
   }
   await writeFile(path.join(dir, ".gitignore"), ".latentdraft/\n", { flag: "wx" }).catch(() => {});
   return { id };

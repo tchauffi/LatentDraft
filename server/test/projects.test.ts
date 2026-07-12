@@ -12,6 +12,9 @@ process.env.PROJECTS_ROOT = ROOT;
 const {
   listProjects,
   createProject,
+  renameProject,
+  duplicateProject,
+  deleteProject,
   listProjectFiles,
   readProjectFile,
   writeProjectFile,
@@ -19,6 +22,9 @@ const {
   deleteProjectFile,
   safeProjectFilePath,
   slugifyProjectName,
+  extractTexTitle,
+  readProjectChat,
+  writeProjectChat,
   projectDir,
 } = await import("../src/projects.js");
 
@@ -31,6 +37,8 @@ test("createProject seeds the template, .gitignore, and shows up in the list", a
   assert.deepEqual(result, { id: "My Paper" });
   const dir = projectDir("My Paper")!;
   assert.equal(await readFile(path.join(dir, ".gitignore"), "utf8"), ".latentdraft/\n");
+  // The template's placeholder title is seeded with the project name.
+  assert.match(await readFile(path.join(dir, "main.tex"), "utf8"), /\\title\{My Paper\}/);
   await access(path.join(dir, "main.tex"));
   await access(path.join(dir, "sections/intro.tex"));
   const projects = await listProjects();
@@ -47,6 +55,88 @@ test("slugifyProjectName cleans punctuation without mangling names", () => {
   assert.equal(slugifyProjectName("Vibratory Mechanics!"), "Vibratory Mechanics");
   assert.equal(slugifyProjectName("../evil"), "evil");
   assert.equal(slugifyProjectName("...."), undefined);
+});
+
+test("extractTexTitle handles nesting and commands, listProjects carries it", async () => {
+  assert.equal(extractTexTitle("\\title{Plain Title}"), "Plain Title");
+  assert.equal(
+    extractTexTitle("\\title{A \\textbf{Bold} Move\\\\with a break}"),
+    "A Bold Move with a break",
+  );
+  assert.equal(extractTexTitle("\\title{}"), undefined);
+  assert.equal(extractTexTitle("no title here"), undefined);
+
+  await createProject("titled");
+  const dir = projectDir("titled")!;
+  await writeFile(
+    path.join(dir, "main.tex"),
+    "\\documentclass{article}\n\\title{Spectral Methods}\n\\begin{document}x\\end{document}\n",
+  );
+  const listed = (await listProjects()).find((p) => p.id === "titled")!;
+  assert.equal(listed.title, "Spectral Methods");
+});
+
+test("renameProject moves the directory and refuses collisions", async () => {
+  await createProject("old-name");
+  await createProject("taken");
+  assert.match((await renameProject("old-name", "taken") as { error: string }).error, /already exists/);
+  const r = await renameProject("old-name", "New Name!");
+  assert.deepEqual(r, { id: "New Name" });
+  await access(path.join(ROOT, "New Name", "main.tex"));
+  await assert.rejects(access(path.join(ROOT, "old-name")));
+  // Renaming to the same id is a no-op, not a collision with itself.
+  assert.deepEqual(await renameProject("taken", "taken"), { id: "taken" });
+});
+
+test("duplicateProject copies sources but not build artifacts or .git", async () => {
+  await createProject("dupe-me");
+  const dir = projectDir("dupe-me")!;
+  await writeFile(path.join(dir, "extra.tex"), "copied");
+  await mkdir(path.join(dir, ".latentdraft/build"), { recursive: true });
+  await writeFile(path.join(dir, ".latentdraft/build/main.pdf"), "x");
+  await mkdir(path.join(dir, ".git"), { recursive: true });
+  await writeFile(path.join(dir, ".git/HEAD"), "x");
+
+  const first = await duplicateProject("dupe-me");
+  assert.deepEqual(first, { id: "dupe-me copy" });
+  const copyDir = projectDir("dupe-me copy")!;
+  assert.equal(await readFile(path.join(copyDir, "extra.tex"), "utf8"), "copied");
+  await access(path.join(copyDir, "main.tex"));
+  await assert.rejects(access(path.join(copyDir, ".latentdraft")));
+  await assert.rejects(access(path.join(copyDir, ".git")));
+
+  // The name is taken now — the next copy gets a numbered suffix.
+  assert.deepEqual(await duplicateProject("dupe-me"), { id: "dupe-me copy 2" });
+  assert.match((await duplicateProject("gone") as { error: string }).error, /not found/i);
+});
+
+test("project chat roundtrips through .latentdraft and stays out of the file list", async () => {
+  await createProject("chatty");
+  assert.deepEqual(await readProjectChat("chatty"), []); // no history yet
+  const messages = [{ id: "m1", role: "user", content: "hello", edits: [], activity: [] }];
+  assert.equal((await writeProjectChat("chatty", messages)).ok, true);
+  assert.deepEqual(await readProjectChat("chatty"), messages);
+  // chat.json lives in the hidden build dir — invisible to the file API.
+  const files = (await listProjectFiles("chatty"))!;
+  assert.ok(!files.some((f) => f.path.includes("chat.json")));
+  // The chat survives a project rename (it moves with the folder).
+  await renameProject("chatty", "chatty2");
+  assert.deepEqual(await readProjectChat("chatty2"), messages);
+  // Guards: bad ids and missing projects.
+  assert.equal((await writeProjectChat("../evil", messages)).ok, false);
+  assert.equal((await writeProjectChat("never-made", messages)).ok, false);
+  assert.equal(await readProjectChat("../evil"), undefined);
+});
+
+test("deleteProject removes the whole directory, including hidden dirs", async () => {
+  await createProject("doomed");
+  const dir = projectDir("doomed")!;
+  await mkdir(path.join(dir, ".latentdraft/build"), { recursive: true });
+  await writeFile(path.join(dir, ".latentdraft/build/main.pdf"), "x");
+  assert.equal((await deleteProject("doomed")).ok, true);
+  await assert.rejects(access(dir));
+  assert.equal((await deleteProject("doomed")).ok, false);
+  assert.equal((await deleteProject("../escape")).ok, false);
 });
 
 test("listProjectFiles hides build artifacts, .git, and agent scratch files", async () => {

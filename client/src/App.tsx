@@ -5,9 +5,13 @@ import PreviewPane, { type PreviewStatus } from "./panes/PreviewPane";
 import ChatPane from "./panes/ChatPane";
 import TopToolbar from "./components/TopToolbar";
 import StatusBar from "./components/StatusBar";
+import ProjectsPage from "./components/ProjectsPage";
 import {
   fetchProjects,
   createProjectApi,
+  renameProjectApi,
+  duplicateProjectApi,
+  deleteProjectApi,
   fetchProjectFiles,
   fetchProjectFileText,
   saveProjectFile,
@@ -45,6 +49,10 @@ export default function App() {
   // `files` holds the text buffers, saved back via debounced autosave. ----
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [templates, setTemplates] = useState<string[]>([]);
+  const [projectsRoot, setProjectsRoot] = useState("");
+  // The projects page is an overlay: the editor (and the agent conversation)
+  // stays mounted underneath while projects are managed.
+  const [projectsOpen, setProjectsOpen] = useState(false);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [files, setFiles] = useState<Record<string, string>>({});
   const [binaryFiles, setBinaryFiles] = useState<string[]>([]);
@@ -232,47 +240,103 @@ export default function App() {
     [saveDirty, loadProject],
   );
 
-  const newProject = useCallback(async () => {
-    const name = window.prompt("New project name:")?.trim();
-    if (!name) return;
-    let template: string | undefined;
-    if (templates.length > 1) {
-      const pick = window
-        .prompt(`Template — one of: ${templates.join(", ")}`, templates[0])
-        ?.trim()
-        .toLowerCase();
-      if (!pick) return;
-      if (!templates.includes(pick)) {
-        window.alert(`Unknown template '${pick}'. Available: ${templates.join(", ")}.`);
-        return;
-      }
-      template = pick;
-    }
-    const r = await createProjectApi(name, template);
-    if ("error" in r) {
-      window.alert(r.error);
-      return;
-    }
+  /** Refetch the project list (titles and mtimes move under our feet). */
+  const refreshProjects = useCallback(async () => {
     setProjects((await fetchProjects()).projects);
-    await switchProject(r.id);
-  }, [switchProject, templates]);
+  }, []);
 
-  // Bootstrap: list projects, create a starter one on first run, open the
-  // last-used (or most recent) project. This is what makes work survive reload.
+  const openProjectsPage = useCallback(() => {
+    setProjectsOpen(true);
+    void refreshProjects().catch(() => {});
+  }, [refreshProjects]);
+
+  // ---- Projects page handlers: each resolves to an error message or null. ----
+  const createNewProject = useCallback(
+    async (name: string, template?: string): Promise<string | null> => {
+      const r = await createProjectApi(name, template);
+      if ("error" in r) return r.error;
+      await refreshProjects();
+      await switchProject(r.id);
+      setProjectsOpen(false);
+      return null;
+    },
+    [refreshProjects, switchProject],
+  );
+
+  const openProject = useCallback(
+    async (id: string) => {
+      await switchProject(id);
+      setProjectsOpen(false);
+    },
+    [switchProject],
+  );
+
+  const renameProject = useCallback(
+    async (id: string, name: string): Promise<string | null> => {
+      const wasCurrent = projectRef.current === id;
+      if (wasCurrent) await saveDirty(); // the directory moves — flush first
+      const r = await renameProjectApi(id, name);
+      if ("error" in r) return r.error;
+      await refreshProjects();
+      if (wasCurrent) await loadProject(r.id);
+      return null;
+    },
+    [saveDirty, refreshProjects, loadProject],
+  );
+
+  const duplicateProject = useCallback(
+    async (id: string): Promise<string | null> => {
+      if (projectRef.current === id) await saveDirty(); // copy what's on screen, not stale disk
+      const r = await duplicateProjectApi(id);
+      if ("error" in r) return r.error;
+      await refreshProjects(); // stay on the page — the copy appears in the grid
+      return null;
+    },
+    [saveDirty, refreshProjects],
+  );
+
+  const deleteProject = useCallback(
+    async (id: string): Promise<string | null> => {
+      const r = await deleteProjectApi(id);
+      if (!r.ok) return r.error ?? "Delete failed.";
+      await refreshProjects();
+      if (projectRef.current === id) {
+        // The open project is gone — reset the editor to a blank slate.
+        projectRef.current = null;
+        mtimes.current = {};
+        dirty.current = new Set();
+        lastCompileRef.current = null;
+        setProjectId(null);
+        setFiles({});
+        setBinaryFiles([]);
+        setOpenTabs([MAIN]);
+        setActive(MAIN);
+        setPdf(null);
+        setStatus("idle");
+        setLog("");
+        setDiagnostics([]);
+        setPendingEdits([]);
+        localStorage.removeItem(PROJECT_KEY);
+      }
+      return null;
+    },
+    [refreshProjects],
+  );
+
+  // Bootstrap: list projects and open the last-used (or most recent) one; with
+  // nothing to open, land on the projects page instead.
   useEffect(() => {
     void (async () => {
       try {
         const initial = await fetchProjects();
         setTemplates(initial.templates);
-        let list = initial.projects;
-        if (list.length === 0) {
-          const r = await createProjectApi("welcome");
-          if ("id" in r) list = (await fetchProjects()).projects;
-        }
-        setProjects(list);
+        setProjectsRoot(initial.root);
+        setProjects(initial.projects);
         const stored = localStorage.getItem(PROJECT_KEY);
-        const pick = list.find((p) => p.id === stored)?.id ?? list[0]?.id;
+        const pick =
+          initial.projects.find((p) => p.id === stored)?.id ?? initial.projects[0]?.id;
         if (pick) await loadProject(pick);
+        else setProjectsOpen(true);
       } catch (err) {
         setStatus("error");
         setLog(`Could not reach the LatentDraft server: ${String(err)}`);
@@ -508,15 +572,29 @@ export default function App() {
         fileName={active}
         status={status}
         agentOpen={agentOpen}
-        projects={projects}
         currentProject={projectId}
-        onSwitchProject={(id) => void switchProject(id)}
-        onNewProject={() => void newProject()}
+        onOpenProjects={openProjectsPage}
         onRecompile={() => void runCompile()}
         onToggleAgent={() => setAgentOpen((o) => !o)}
         onDownload={downloadPdf}
         canDownload={!!pdf}
       />
+
+      {projectsOpen && (
+        <ProjectsPage
+          projects={projects}
+          templates={templates}
+          root={projectsRoot}
+          currentProject={projectId}
+          canClose={projectId !== null}
+          onClose={() => setProjectsOpen(false)}
+          onOpen={(id) => void openProject(id)}
+          onCreate={createNewProject}
+          onRename={renameProject}
+          onDuplicate={duplicateProject}
+          onDelete={deleteProject}
+        />
+      )}
 
       <div className="body">
         <div className="workspace">
@@ -562,8 +640,11 @@ export default function App() {
           </PanelGroup>
         </div>
 
-        {/* Kept mounted so collapsing the agent never loses the conversation. */}
+        {/* Collapsing only hides it (CSS) — the conversation survives. The
+            project KEY remounts it on switch: each project hydrates its own
+            history from .latentdraft/chat.json. */}
         <ChatPane
+          key={projectId ?? "no-project"}
           projectId={projectId}
           onBeforeSend={saveDirty}
           sessionId={sessionId}
