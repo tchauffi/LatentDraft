@@ -16,6 +16,8 @@ import { renderMermaid, renderMermaidIn } from "./mermaid.js";
 import { renderPdf, extractPdfText, analyzePdfLayout } from "./pdftools.js";
 import { formatLayoutReport } from "./layout.js";
 import { analyzeAts } from "./ats.js";
+import { checkBibtex, type BibEntry } from "./bibcheck.js";
+import { verifyEntries, formatVerifyReport, type VerifyResult } from "./bibverify.js";
 import path from "node:path";
 
 const MAIN = "main.tex";
@@ -95,6 +97,16 @@ export function createAgentTools(opts: AgentToolsOptions) {
     /** true when a doc changed since the last compile_check. */
     dirty: false,
     lastCheck: undefined as { ok: boolean; log: string } | undefined,
+    /** Last check_bibtex result this turn, for the end-of-turn recheck. */
+    lastBib: undefined as { ok: boolean; summary: string; report: string } | undefined,
+    /** true when a .tex/.bib doc changed since the last check_bibtex. */
+    bibDirty: false,
+    /** Whether the last check_bibtex verified online — the recheck matches it. */
+    bibOnline: true,
+    /** Per-turn cache of online verdicts, so the end-of-turn recheck only
+     * re-fetches entries whose fields actually changed. Keyed by field
+     * signature; transient failures (unverified) are not cached. */
+    verifyCache: new Map<string, VerifyResult>(),
     /** Pages rendered by the most recent view_pdf, for the recovery loop to
      * attach as image parts. Tool results themselves are serialized text, so
      * inlining base64 there would flood the model's context. */
@@ -136,6 +148,31 @@ export function createAgentTools(opts: AgentToolsOptions) {
     } catch {
       return undefined;
     }
+  }
+
+  /** All .tex/.bib contents visible this turn: disk files overlaid with working copies. */
+  async function gatherBibFiles(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    const wanted = (p: string) => /\.(tex|bib)$/i.test(p);
+    if (projectDir) {
+      for (const f of (await listFilesInDir(projectDir)) ?? []) {
+        if (f.binary || !wanted(f.path)) continue;
+        const doc = await loadDoc(f.path);
+        if (doc !== undefined) out[f.path] = doc;
+      }
+    } else {
+      for (const name of await listSessionFiles(opts.compileSessionId)) {
+        if (!wanted(name) || state.docs.has(name)) continue;
+        try {
+          out[name] = await readFile(path.join(sessionDir(opts.compileSessionId), name), "utf8");
+        } catch {
+          /* unreadable session file — skip */
+        }
+      }
+    }
+    // Working copies win: pending edits and files created this turn.
+    for (const [file, content] of state.docs) if (wanted(file)) out[file] = content;
+    return out;
   }
 
   /**
@@ -261,6 +298,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       state.docs.set(target.path, res.doc);
       state.edits += 1;
       state.dirty = true;
+      if (/\.(tex|bib)$/i.test(target.path)) state.bibDirty = true;
       appliedSigs.add(sig);
       const id = `edit-${++editSeq}`;
       opts.emitEdit({
@@ -354,6 +392,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       state.docs.set(norm, content);
       state.edits += 1;
       state.dirty = true;
+      if (/\.(tex|bib)$/i.test(norm)) state.bibDirty = true;
       const id = `edit-${++editSeq}`;
       opts.emitEdit({
         id,
@@ -561,6 +600,83 @@ export function createAgentTools(opts: AgentToolsOptions) {
   });
 
   /**
+   * The full bib check: local cross-check + (optionally) online verification
+   * of cited entries. Shared by the check_bibtex tool and the end-of-turn
+   * recheck in finalizeBib. Online verdicts are cached per entry signature,
+   * so a recheck only re-fetches entries whose fields the agent changed.
+   */
+  async function runBibCheck(
+    verifyOnline: boolean,
+  ): Promise<{ ok: boolean; summary: string; report: string }> {
+    const files = await gatherBibFiles();
+    const local = checkBibtex(files);
+    let ok = local.ok;
+    let summary = local.summary;
+    let report = local.report;
+    if (verifyOnline && local.citedEntries.length > 0) {
+      const sig = (e: BibEntry) =>
+        JSON.stringify([e.key, e.title, e.author, e.year, e.doi, e.eprint, e.url]);
+      const fresh = local.citedEntries.filter((e) => !state.verifyCache.has(sig(e)));
+      const freshResults = await verifyEntries(fresh);
+      const freshByKey = new Map(freshResults.map((r) => [r.key, r]));
+      for (const e of fresh) {
+        const r = freshByKey.get(e.key);
+        // Transient failures stay uncached so a recheck retries them.
+        if (r && r.verdict !== "unverified") state.verifyCache.set(sig(e), r);
+      }
+      const results: VerifyResult[] = [];
+      for (const e of local.citedEntries) {
+        const r = state.verifyCache.get(sig(e)) ?? freshByKey.get(e.key);
+        if (r) results.push(r);
+      }
+      const overflow = freshResults.find((r) => r.key === "…");
+      if (overflow) results.push(overflow);
+      const verify = formatVerifyReport(
+        results,
+        new Map(local.citedEntries.map((e) => [e.key, e])),
+      );
+      ok = ok && verify.ok;
+      summary = local.ok ? verify.summary : `${local.summary}; ${verify.summary}`;
+      report =
+        `${report}\n\n${verify.section}` +
+        (verify.ok
+          ? ""
+          : "\n\nFor MISMATCH/NOT FOUND entries: find the real publication with web_search and " +
+            "fix the .bib fields; if no real source exists, tell the user which references " +
+            "appear fabricated and suggest removing them. NEVER invent bibliographic data.");
+    }
+    const result = { ok, summary, report };
+    state.lastBib = result;
+    state.bibDirty = false;
+    state.bibOnline = verifyOnline;
+    emitTool({ name: "check_bibtex", summary, ok });
+    return result;
+  }
+
+  const check_bibtex = createTool({
+    id: "check_bibtex",
+    description:
+      "Verify the bibliography: cross-check every \\cite-style key against the .bib entries / " +
+      "\\bibitem definitions AND verify each cited entry against real-world sources (Crossref " +
+      "DOI lookup, arXiv, title search) to catch hallucinated references — invented papers, " +
+      "fake or mismatched DOIs. Static check on the working copy, no compile needed. Use it " +
+      "whenever the user asks about citations/references or after writing bibliography entries.",
+    inputSchema: z.object({
+      verify_online: z
+        .boolean()
+        .optional()
+        .describe(
+          "Also verify cited entries against Crossref/arXiv (default true). " +
+            "Set false for a fast local-only key check.",
+        ),
+    }),
+    execute: async ({ context: { verify_online } }) => {
+      const result = await runBibCheck(verify_online !== false);
+      return result.report;
+    },
+  });
+
+  /**
    * Authoritative end-of-turn verification. Runs a compile if the document
    * changed since the last check (or was never checked), emits the result, and
    * returns the true final compile status — so the turn never ends on an
@@ -576,6 +692,21 @@ export function createAgentTools(opts: AgentToolsOptions) {
     return state.lastCheck;
   }
 
+  /**
+   * End-of-turn bibliography recheck, mirroring finalize(): when the agent
+   * used check_bibtex this turn AND edited files, the turn must not end on an
+   * unverified bibliography. Re-runs the check (same online setting, cached
+   * verdicts) if anything changed since the last one; returns undefined when
+   * the bib workflow was never active or nothing was edited.
+   */
+  async function finalizeBib(): Promise<
+    { ok: boolean; summary: string; report: string } | undefined
+  > {
+    if (!state.lastBib || state.edits === 0) return undefined;
+    if (!state.bibDirty) return state.lastBib;
+    return runBibCheck(state.bibOnline);
+  }
+
   return {
     tools: {
       edit_document,
@@ -588,6 +719,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       render_mermaid,
       view_pdf,
       ats_check,
+      check_bibtex,
     },
     getDoc: () => state.docs.get(MAIN) ?? "",
     /** True once the agent has compiled at least once this turn — after that,
@@ -600,6 +732,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       return imgs;
     },
     finalize,
+    finalizeBib,
   };
 }
 
@@ -632,6 +765,7 @@ You have tools:
 - render_mermaid(code, filename?): render a Mermaid DIAGRAM (flowchart, sequence, class, state, ER, gantt, pie, mindmap) to a PNG in the build directory. Prefer it over Python for conceptual/structural diagrams. Pass raw Mermaid source (no fences), then edit_document to add \\includegraphics{<filename>}.
 - view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm.
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
+- check_bibtex(verify_online?): verify the bibliography — every \\cite key vs the .bib entries / \\bibitem definitions, AND each cited entry vs real-world sources (Crossref DOI, arXiv, title search) to catch hallucinated references (invented papers, fake or mismatched DOIs). Use it whenever the user asks about citations/references/bibliography or after writing bibliography entries.
 
 Tool guidance:
 - Invoke tools ONLY through the native tool/function-calling mechanism. NEVER print tool-call JSON (like {"name": "edit_document", ...}) or <tool_call> tags as part of your reply text — that is not a tool call and does nothing.
@@ -661,6 +795,7 @@ Rules:
 - For FontAwesome icons (\\faPhone, \\faEnvelope, \\faGithub, \\faLinkedin, \\faMapMarker, …) use \\usepackage{fontawesome} — the classic v4 package, which compiles fine here. NEVER use \\usepackage{fontawesome5}: its load-time glyph-name introspection (\\XeTeXglyphname) CRASHES this system's Tectonic/XeTeX engine. The \\faXxx command names for common CV icons are the same in both packages, so just swap the package name.
 - If compile_check reports that the engine CRASHED (e.g. "invalid pointer", "core dumped", "engine CRASHED", or a fontawesome/OTF failure), do NOT retry the same source. If it was fontawesome5, replace \\usepackage{fontawesome5} with \\usepackage{fontawesome} (v4); otherwise remove the offending OTF font package, then compile_check again.
 - Missing packages are a common failure — if the log says a command is undefined (e.g. \\href needs hyperref), add the \\usepackage.
+- When check_bibtex reports problems: fix wrong keys by anchoring edit_document on the quoted "> N:" source lines; for entries flagged MISMATCH or NOT FOUND, find the real publication with web_search and correct the .bib fields, or tell the user which references appear fabricated. Entries it could NOT check (❓) are not necessarily wrong — leave them and mention them. After your fixes, run check_bibtex AGAIN to confirm they resolve — never end the turn on unverified bibliography fixes. NEVER invent bibliographic data (authors, titles, years, DOIs).
 - For pure questions ("what does amsmath give me?"), just answer — don't edit or compile.
 
 Current document:
