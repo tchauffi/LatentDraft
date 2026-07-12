@@ -1,5 +1,8 @@
 # LatentDraft
 
+[![CI](https://github.com/tchauffi/LatentDraft/actions/workflows/ci.yml/badge.svg)](https://github.com/tchauffi/LatentDraft/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+
 A local Overleaf boosted by agents. Three panes:
 
 - **Editor** — multi-file LaTeX source (CodeMirror) with autocomplete (`\cite{`/`\ref{` keys extracted from your project), inline compile-error squiggles, and SyncTeX (Ctrl/Cmd+click a source line to jump the PDF; double-click the PDF to jump to the source)
@@ -10,10 +13,14 @@ A local Overleaf boosted by agents. Three panes:
 
 The agent is **provider-agnostic**: it defaults to a local **Ollama** model (no API key), and can also use any OpenAI-compatible endpoint (LM Studio, vLLM, OpenRouter, OpenAI) or Anthropic — all behind one interface (a [Mastra](https://mastra.ai) `Agent` over AI SDK v5 providers).
 
+![Editor — three panes: source, PDF preview, agent chat](docs/screenshots/editor.png)
+
+![Projects page with the template gallery](docs/screenshots/projects.png)
+
 ## Requirements
 
 - **Node.js** 20+
-- **Tectonic** — the LaTeX engine. A prebuilt binary is already vendored at `./bin/tectonic`. To re-fetch it:
+- **Tectonic** — the LaTeX engine. `npm run setup` fetches a binary into `./bin/tectonic` (or symlinks a system install); to fetch it manually:
   ```sh
   cd bin && curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
   ```
@@ -24,7 +31,7 @@ The agent is **provider-agnostic**: it defaults to a local **Ollama** model (no 
   ollama pull qwen2.5-coder   # or llama3.1 / mistral-nemo — tool-capable models work best
   ```
   Models that can't call tools still work via a fenced-block edit fallback.
-- **Python** (for the `run_python` / `view_pdf` / `ats_check` tools) — a virtualenv with matplotlib, seaborn, pandas, numpy, openpyxl and PyMuPDF at `server/.venv`. Create it once:
+- **Python** (for the `run_python` / `view_pdf` / `ats_check` tools) — a virtualenv with matplotlib, seaborn, pandas, numpy, openpyxl and PyMuPDF at `server/.venv`. `npm run setup` creates it; manually:
   ```sh
   cd server && python3 -m venv .venv && .venv/bin/pip install matplotlib seaborn pandas numpy openpyxl pymupdf
   ```
@@ -35,14 +42,26 @@ The agent is **provider-agnostic**: it defaults to a local **Ollama** model (no 
 
 ```sh
 npm install       # installs client + server (npm workspaces)
+npm run setup     # fetches the Tectonic binary + creates the Python venv (SKIP_VENV=1 to skip)
 npm run dev       # starts API (:5174) and Vite dev server (:5173)
 ```
 
 Open http://localhost:5173.
 
+### Production
+
+```sh
+npm run build     # builds the client to client/dist
+npm start         # serves UI + API together on http://127.0.0.1:5174
+```
+
+## Security
+
+LatentDraft is a **single-user, local tool**. The server binds to `127.0.0.1` by default, has **no authentication**, and the agent's `run_python` tool **executes arbitrary code on your machine** — that is the feature, but it means every API endpoint is as trusted as your own shell. Never set `HOST=0.0.0.0` (or put the server behind a reverse proxy) on a network you don't fully trust without adding an authentication layer in front.
+
 ## Configuration (environment variables)
 
-The server reads these at startup:
+The server reads these at startup (plain environment variables — there is no `.env` loader; see `.env.example` for a template you can `source`):
 
 | Variable            | Default                  | Purpose                                              |
 | ------------------- | ------------------------ | ---------------------------------------------------- |
@@ -103,12 +122,18 @@ The loop is built to survive **small local models** that fumble tool calling. If
 
 ```
 server/   Express API (tsx). /api/compile (Tectonic), /api/chat (Mastra agent), /api/providers
+          In production (npm start) it also serves the built client from client/dist.
 client/   Vite + React. EditorPane, PreviewPane, ChatPane
-bin/      vendored tectonic binary (gitignored)
+scripts/  setup.sh — fetches Tectonic, creates the Python venv
+bin/      tectonic binary, fetched by npm run setup (gitignored)
 ```
 
 ## Notes & limits
 
-- The editor's file tabs (`main.tex`, `refs.bib`, `sections/…`) are all sent along on every compile, so `\input` and `\bibliography` resolve — for both the live preview and the agent's `compile_check` sandbox. The agent itself only edits `main.tex`; adding/removing files from the UI is not built yet.
+- The editor's file tabs (`main.tex`, `refs.bib`, `sections/…`) are all sent along on every compile, so `\input` and `\bibliography` resolve — for both the live preview and the agent's `compile_check` sandbox. The agent reads and edits **any project file**, and the file tree supports creating, renaming, and deleting files.
 - Stale compile dirs under `server/tmp/` are deleted automatically after 24h (on server start).
 - The document is sent to the model on each chat turn; very large documents may exceed a local model's context window.
+
+## License
+
+[AGPL-3.0](LICENSE). If you run a modified LatentDraft as a network service, the AGPL requires you to make your modified source available to its users.

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: npm ci
+
+      # compile/layout/mermaid tests spawn the real Tectonic binary.
+      - name: Install tectonic
+        run: |
+          mkdir -p bin
+          (cd bin && curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh)
+
+      # Tectonic downloads the LaTeX bundle on first compile — cache it.
+      - name: Cache tectonic bundle
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Tectonic
+          key: tectonic-bundle-${{ runner.os }}
+
+      - name: Install python deps
+        run: pip install matplotlib seaborn pandas numpy openpyxl pymupdf
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - run: npm test
+        env:
+          PYTHON_BIN: python
+
+      - name: Production serve smoke test
+        run: |
+          npm start &
+          for i in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:5174/api/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:5174/api/health | grep -q '"ok":true'
+          curl -fsS http://127.0.0.1:5174/ | grep -q '<div id="root">'
+          curl -fsS http://127.0.0.1:5174/some/deep/link | grep -q '<div id="root">'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5174/api/nonexistent)" = 404

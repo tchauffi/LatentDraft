@@ -1,0 +1,23 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.0] - 2026-07-12
+
+First public release.
+
+### Added
+
+- **Three-pane editor**: CodeMirror LaTeX source (multi-file, `\cite`/`\ref` autocomplete, inline compile-error squiggles), live PDF preview, and an agent chat pane.
+- **Projects as plain folders** under `~/LatentDraft` (or `PROJECTS_ROOT`): create from a template gallery (article, beamer, CV), rename, duplicate, delete; file tree with create/rename/delete; autosave; build artifacts isolated in `.latentdraft/`.
+- **Live compile with Tectonic**, structured error diagnostics, and **SyncTeX** both ways (Ctrl/Cmd+click source → PDF, double-click PDF → source).
+- **Provider-agnostic AI agent** (Mastra over AI SDK v5): local Ollama by default, plus Ollama Cloud, any OpenAI-compatible endpoint, and Anthropic. Edits are proposed as accept/reject diff cards and **verified to compile** before you see them.
+- **Small-model resilience**: text-form tool-call recovery (bare JSON, `<tool_call>` tags, fenced blocks, pseudo-code), `<think>` stripping, automatic Ollama `num_ctx` variants to avoid silent prompt truncation.
+- **Agent tools**: `edit_document`, `read_document`, `compile_check`, `web_search` (Tavily/Brave/DuckDuckGo), `run_python` (matplotlib/seaborn figures, data-file import), `render_mermaid`, `view_pdf` layout inspection, `ats_check`.
+- **Production mode**: `npm run build && npm start` serves the UI and API together on one port; unknown `/api` routes return JSON 404s; async route errors return JSON 500s instead of hanging.
+- **Setup script** (`npm run setup`): fetches the Tectonic binary and creates the Python venv.
+- Per-project chat history, context meter, markdown chat rendering.
+
+[0.1.0]: https://github.com/tchauffi/LatentDraft/releases/tag/v0.1.0
