@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`/find-refs`** chat command + `find_references` agent tool: reference **discovery**, the constructive counterpart to `/check-bibtex`'s verification. Ask for a citation for a topic, claim, or half-remembered title — the agent searches **Crossref and arXiv**, presents real candidates (title, authors, year, venue, citation counts), and inserts the chosen entry's **ready-made BibTeX verbatim** plus the `\cite` as accept/reject diffs. Entries already in your bibliography are recognized (by DOI or title) and reused instead of duplicated; generated keys never collide with existing ones. Because every candidate comes from a real indexed record, the agent never writes a `.bib` entry from memory — the system prompt now forbids it outright.
+- **`/review`** chat command: a plan-first proofreading pass — spelling/grammar, clarity, inconsistent terminology/notation/capitalization, undefined acronyms, tense shifts, and LaTeX-level nits (`\ref` vs `\eqref`, heading case, missing `~` before citations). Replies with an overall assessment and a numbered findings list quoting the exact text; edits only after you approve, then recompiles.
+- **`/check-submission`** chat command: check the compiled document against a venue's submission rules. Uses the real layout from `view_pdf` (page count, margins, fonts, overfull lines), looks up the venue's author guidelines if you only name the venue, and hunts the source for anonymization leaks (`\author`/`\thanks`/emails, acknowledgements, "our previous work"). Replies with a pass/fail checklist plus a numbered fix plan; edits only after you approve, then re-verifies with `view_pdf`.
+- **`ask_user`** agent tool + **clickable answer choices** in the chat: when the agent needs a decision (approve a plan, pick a file or reference candidate, supply a missing detail), it can present 2–5 options that render as **buttons** — click one and it's sent as your reply, or hit "Other…" to type a custom answer. Earlier questions stay in the history with your pick highlighted. Works with text-form tool-call recovery, so small local models get the buttons too.
+
 ## [0.2.0] - 2026-07-12
 
 ### Added
