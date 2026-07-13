@@ -300,6 +300,9 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
     for (let round = 0; round <= MAX_RECOVERY_ROUNDS; round++) {
       if (abort.signal.aborted) return;
       const { text, calls } = await runRound(convo, currentSystemPrompt());
+      // ask_user ran (natively): the question is on screen and further edits
+      // are blocked — end the turn so the user can actually answer.
+      if (calls.length === 0 && agentTools.hasAsked()) return;
       if (calls.length === 0) {
         // Silent stall: nothing visible and nothing recovered. Nudge the model
         // to act on its (hidden) plan instead of ending the turn on nothing.
@@ -324,6 +327,9 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
         resultBlocks.push(`Result of ${call.name}:\n${r.text}`);
         images.push(...r.images);
       }
+      // ask_user recovered from text: don't feed results back for another
+      // round — the turn is over until the user picks an answer.
+      if (agentTools.hasAsked()) return;
 
       // Keep only the model's own prose in the assistant slot — a template-y
       // summary of the calls gets parroted verbatim by small models. The call
@@ -355,6 +361,9 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       const check = await agentTools.finalize();
       if (!check || check.ok) break; // nothing changed, or it compiles
       if (round === MAX_CORRECTIVE_ROUNDS) break; // out of attempts; banner shows the failure
+      // A question is pending: edits are blocked, so a fix round can't fix
+      // anything — leave the banner and let the user answer first.
+      if (agentTools.hasAsked()) break;
       write({ type: "text", text: "\n\n_Document still fails to compile — retrying a fix…_\n\n" });
       await runAgentTurn([
         {
@@ -379,6 +388,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       if (bib.report === prevBibReport) break;
       prevBibReport = bib.report;
       if (round === MAX_BIB_RECHECK_ROUNDS) break;
+      if (agentTools.hasAsked()) break; // pending question — no fix rounds
       write({ type: "text", text: "\n\n_Rechecking references after the edits…_\n\n" });
       await runAgentTurn([
         {

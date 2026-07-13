@@ -409,13 +409,47 @@ test("ask_user emits the question with its choices and tells the model to stop",
   assert.deepEqual(asks, [
     { question: "Which file is the resume?", options: ["main.tex", "cv.tex"] },
   ]);
+  assert.equal(agent.hasAsked(), true);
 
-  // Fewer than two usable choices → nothing shown, model told to fix the call.
+  // The question is pending: document changes are hard-blocked, so the model
+  // cannot "ask" and then keep editing before the user picks an answer.
+  const blockedEdit = String(
+    await exec(agent.tools.edit_document, {
+      explanation: "sneaky edit",
+      old_string: "x",
+      new_string: "y",
+    }),
+  );
+  assert.match(blockedEdit, /NOT APPLIED: you asked the user/);
+  assert.equal(agent.getDoc(), "x", "document unchanged while a question is pending");
+  const blockedCreate = String(
+    await exec(agent.tools.create_file, { path: "a.tex", content: "hi" }),
+  );
+  assert.match(blockedCreate, /NOT APPLIED: you asked the user/);
+
+  // One question per turn.
+  const again = String(
+    await exec(agent.tools.ask_user, { question: "And this?", options: ["a", "b"] }),
+  );
+  assert.match(again, /NOT SHOWN: you already asked/);
+  assert.equal(asks.length, 1);
+});
+
+test("ask_user rejects fewer than two usable choices without blocking the turn", async () => {
+  const asks: unknown[] = [];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-ask-test-2",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitAsk: (a) => asks.push(a),
+  });
   const bad = String(
     await exec(agent.tools.ask_user, { question: "Hm?", options: ["only", "  "] }),
   );
   assert.match(bad, /NOT SHOWN/);
-  assert.equal(asks.length, 1);
+  assert.equal(asks.length, 0);
+  assert.equal(agent.hasAsked(), false, "a rejected ask must not block the turn");
 });
 
 test("find_references searches through the injected fetch and respects existing bib keys", async (t) => {

@@ -24,6 +24,12 @@ import path from "node:path";
 
 const MAIN = "main.tex";
 
+/** Every mutating tool refuses with this once ask_user has run this turn. */
+const ASKED_BLOCK_MSG =
+  "NOT APPLIED: you asked the user a question with ask_user — their answer choices are on " +
+  "screen. STOP and end your turn now; make no further changes until they answer in the " +
+  "next message.";
+
 export interface EditEvent {
   id: string;
   explanation: string;
@@ -123,6 +129,9 @@ export function createAgentTools(opts: AgentToolsOptions) {
      * attach as image parts. Tool results themselves are serialized text, so
      * inlining base64 there would flood the model's context. */
     renderedImages: [] as string[],
+    /** true once ask_user ran this turn: the user must answer before anything
+     * else changes, so mutating tools refuse and chat.ts ends the turn. */
+    asked: false,
   };
   let editSeq = 0;
   /** Signatures of edits already applied this turn — weak models love to repeat themselves. */
@@ -251,6 +260,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       new_string: z.string().describe("Replacement text."),
     }),
     execute: async ({ context }) => {
+      if (state.asked) return ASKED_BLOCK_MSG;
       let { old_string, new_string } = context;
       const { explanation, file } = context;
       const target = resolveTarget(file);
@@ -391,6 +401,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       explanation: z.string().optional().describe("One short sentence: why this file."),
     }),
     execute: async ({ context: { path: rel, content, explanation } }) => {
+      if (state.asked) return ASKED_BLOCK_MSG;
       if (!projectDir) {
         return `NOT CREATED: this session has no project — put everything in ${MAIN}.`;
       }
@@ -769,15 +780,23 @@ export function createAgentTools(opts: AgentToolsOptions) {
         .describe("2–5 short, distinct answer choices (put your recommended one first)."),
     }),
     execute: async ({ context: { question, options } }) => {
+      if (state.asked) {
+        return (
+          "NOT SHOWN: you already asked the user a question this turn. END YOUR TURN and " +
+          "wait for their answer — one question at a time."
+        );
+      }
       const cleaned = options.map((o) => o.trim()).filter(Boolean).slice(0, 5);
       if (cleaned.length < 2) {
         return "NOT SHOWN: provide at least 2 non-empty answer choices.";
       }
+      state.asked = true;
       opts.emitAsk?.({ question: question.trim(), options: cleaned });
       return (
         "The question and its answer buttons are now shown to the user. END YOUR TURN " +
         "NOW with a brief plain-text sentence (do not repeat the options — they are " +
-        "already on screen). The user's answer will arrive as the next message."
+        "already on screen). Document changes are blocked until the user answers; their " +
+        "answer will arrive as the next message."
       );
     },
   });
@@ -834,6 +853,8 @@ export function createAgentTools(opts: AgentToolsOptions) {
     /** True once the agent has compiled at least once this turn — after that,
      * the editor's pre-turn compile log is stale and should stop being shown. */
     hasChecked: () => state.lastCheck !== undefined,
+    /** True once ask_user ran this turn — the turn must end and wait for the answer. */
+    hasAsked: () => state.asked,
     /** Base64 PNG pages from the most recent view_pdf; clears on read. */
     takeRenderedImages: (): string[] => {
       const imgs = state.renderedImages;
@@ -877,7 +898,7 @@ You have tools:
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
 - check_bibtex(verify_online?): verify the bibliography — every \\cite key vs the .bib entries / \\bibitem definitions, AND each cited entry vs real-world sources (Crossref DOI, arXiv, title search) to catch hallucinated references (invented papers, fake or mismatched DOIs). Use it whenever the user asks about citations/references/bibliography or after writing bibliography entries.
 - find_references(query, max_results?): search Crossref + arXiv for REAL papers on a topic/claim/title and get candidates with ready-to-insert BibTeX. Whenever a new bibliography entry is needed (the user wants a citation, or you want to cite something), get it from find_references — NEVER write a .bib entry from memory.
-- ask_user(question, options): show the user ONE question with 2–5 clickable answer choices (plus a free-text field). Their answer arrives as the NEXT user message — call it, then END YOUR TURN and wait.
+- ask_user(question, options): show the user ONE question with 2–5 clickable answer choices (plus a free-text field). Their answer arrives as the NEXT user message — call it, then END YOUR TURN and wait. Once asked, document changes are BLOCKED until they answer, so never ask and then keep working.
 
 Tool guidance:
 - Invoke tools ONLY through the native tool/function-calling mechanism. NEVER print tool-call JSON (like {"name": "edit_document", ...}) or <tool_call> tags as part of your reply text — that is not a tool call and does nothing.
