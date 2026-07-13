@@ -50,6 +50,53 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       "fabricate or alter bibliographic data.",
   },
   {
+    name: "review",
+    description: "Proofread the document: findings + numbered fix plan first, edits after you approve",
+    argLabel: "Focus or extra instructions",
+    prompt:
+      "Proofread and review the writing in this project. This turn is REVIEW AND PLANNING " +
+      "ONLY — do NOT call edit_document or create_file yet.\n" +
+      "1. Read everything relevant: list_files, then read_document on each .tex file (skip " +
+      "generated/style files).\n" +
+      "2. Review for: spelling and grammar; clarity and wordiness; inconsistent terminology, " +
+      "notation, capitalization, and hyphenation; acronyms used before they are defined; " +
+      "tense and voice shifts; awkward or ambiguous sentences; LaTeX-level issues (mixing " +
+      "\\ref/\\eqref styles, inconsistent heading case, missing non-breaking spaces before " +
+      "\\cite/\\ref).\n" +
+      "3. Reply with: (a) a one-paragraph overall assessment; (b) a NUMBERED list of concrete " +
+      "findings, each quoting the exact current text and the file it is in, with your " +
+      "proposed rewording — most important first, and skip nitpicks that don't help; (c) " +
+      "anything you deliberately left alone (e.g. correct but unusual phrasing).\n" +
+      "4. Finish by asking me which numbers to apply (or 'all') — then WAIT.\n" +
+      "In a LATER message, once I approve: apply the approved items with edit_document " +
+      "(anchoring old_string on the quoted text), run compile_check, and summarize what " +
+      "changed. Never change technical meaning, results, or claims while rewording.",
+  },
+  {
+    name: "check-submission",
+    description: "Check the document against a venue's submission rules (pages, margins, anonymity)",
+    argLabel: "Venue and its rules (e.g. \"NeurIPS 2026, 9 pages excl. refs, anonymized\")",
+    prompt:
+      "Check whether this document meets its target venue's submission requirements. This " +
+      "turn is CHECKING AND PLANNING ONLY — do NOT call edit_document or create_file yet.\n" +
+      "1. Establish the requirements: use the venue/rules I gave below if any; if I only " +
+      "named the venue, web_search its current author guidelines (page limit and what counts " +
+      "toward it, anonymization policy, format/template, abstract limits). If you cannot " +
+      "establish them, ask me instead of guessing.\n" +
+      "2. Run view_pdf to get the REAL page count, paper size, margins, overfull lines, and " +
+      "fonts. Judge the page limit against what the venue counts (e.g. references excluded).\n" +
+      "3. If the venue requires anonymization, read the source files and hunt for leaks: " +
+      "\\author/\\thanks/\\email content, acknowledgements, grant numbers, links to personal " +
+      "or lab repos, and self-citations phrased as 'our previous work'.\n" +
+      "4. Reply with: (a) a pass/fail CHECKLIST — one line per requirement with the evidence " +
+      "(e.g. '⛔ 10 pages of content, limit is 9'); (b) a NUMBERED fix plan for every " +
+      "failure, quoting the text or naming the layout change; (c) requirements you could not " +
+      "verify, stated as such.\n" +
+      "5. Finish by asking me to approve the plan — then WAIT.\n" +
+      "In a LATER message, once I approve: apply the fixes with edit_document, then re-run " +
+      "view_pdf (and compile_check) to confirm the document now complies, and summarize.",
+  },
+  {
     name: "check-bibtex",
     description: "Verify references: \\cite keys resolve and sources are real (Crossref/arXiv)",
     prompt:

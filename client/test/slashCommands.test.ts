@@ -50,6 +50,24 @@ test("/find-refs expands to the find_references workflow", () => {
   );
 });
 
+test("/review expands to a plan-first proofread", () => {
+  const exp = expandSlashCommand("/review");
+  assert.ok(exp);
+  assert.match(exp.prompt, /REVIEW AND PLANNING\s+ONLY/);
+  assert.match(exp.prompt, /do NOT call edit_document/);
+  assert.match(exp.prompt, /NUMBERED list of concrete\s+findings/);
+  assert.match(exp.prompt, /Never change technical meaning/);
+});
+
+test("/check-submission expands to a plan-first compliance check", () => {
+  const exp = expandSlashCommand("/check-submission NeurIPS 2026, 9 pages excl. refs");
+  assert.ok(exp);
+  assert.match(exp.prompt, /CHECKING AND PLANNING\s+ONLY/);
+  assert.match(exp.prompt, /view_pdf/);
+  assert.match(exp.prompt, /anonymization/);
+  assert.match(exp.prompt, /Venue and its rules[^:]*: NeurIPS 2026, 9 pages excl\. refs/);
+});
+
 test("unknown commands and plain text pass through as null", () => {
   assert.equal(expandSlashCommand("/unknown-cmd"), null);
   assert.equal(expandSlashCommand("fix the intro"), null);
@@ -60,11 +78,16 @@ test("matchSlashCommands offers commands while the name is being typed", () => {
   assert.ok(matchSlashCommands("/").some((c) => c.name === "check-bibtex"));
   assert.ok(matchSlashCommands("/").some((c) => c.name === "apply"));
   assert.ok(matchSlashCommands("/").some((c) => c.name === "find-refs"));
+  assert.ok(matchSlashCommands("/").some((c) => c.name === "review"));
+  assert.ok(matchSlashCommands("/").some((c) => c.name === "check-submission"));
   assert.equal(matchSlashCommands("/ap").length, 1);
   assert.equal(matchSlashCommands("/ap")[0].name, "apply");
-  assert.equal(matchSlashCommands("/che").length, 1);
-  assert.equal(matchSlashCommands("/CHE").length, 1);
+  // "check-" is a shared prefix of check-bibtex and check-submission.
+  assert.equal(matchSlashCommands("/che").length, 2);
+  assert.equal(matchSlashCommands("/CHE").length, 2);
+  assert.equal(matchSlashCommands("/check-b").length, 1);
   assert.equal(matchSlashCommands("/check-bibtex").length, 1);
+  assert.equal(matchSlashCommands("/rev")[0].name, "review");
   assert.equal(matchSlashCommands("/fi")[0].name, "find-refs");
 });
 
