@@ -91,6 +91,7 @@ interface InvokableTool {
  *   { type: "edit",  id, explanation, old_string, new_string } proposed edit (validated to match)
  *   { type: "check", ok, log }                                 result of a compile_check
  *   { type: "tool",  name, summary, ok }                       non-edit tool activity
+ *   { type: "ask",   question, options }                       clickable answer choices
  *   { type: "error", message }
  *   { type: "done" }
  */
@@ -158,6 +159,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       }),
     emitCheck: (c) => write({ type: "check", ok: c.ok, log: c.log }),
     emitTool: (t) => write({ type: "tool", name: t.name, summary: t.summary, ok: t.ok }),
+    emitAsk: (a) => write({ type: "ask", question: a.question, options: a.options }),
   });
 
   const knownToolNames: ReadonlySet<string> = new Set(Object.keys(agentTools.tools));

@@ -386,6 +386,38 @@ test("fetch_url returns page text through the injected fetch and emits its event
   assert.equal(toolEvents[1].ok, false);
 });
 
+test("ask_user emits the question with its choices and tells the model to stop", async () => {
+  const asks: { question: string; options: string[] }[] = [];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-ask-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitAsk: (a) => asks.push(a),
+  });
+
+  assert.ok(agent.tools.ask_user, "ask_user is registered");
+  assert.match(buildSystemPrompt("x"), /ask_user/);
+
+  const result = String(
+    await exec(agent.tools.ask_user, {
+      question: "Which file is the resume?",
+      options: ["main.tex", "cv.tex"],
+    }),
+  );
+  assert.match(result, /END YOUR TURN/);
+  assert.deepEqual(asks, [
+    { question: "Which file is the resume?", options: ["main.tex", "cv.tex"] },
+  ]);
+
+  // Fewer than two usable choices → nothing shown, model told to fix the call.
+  const bad = String(
+    await exec(agent.tools.ask_user, { question: "Hm?", options: ["only", "  "] }),
+  );
+  assert.match(bad, /NOT SHOWN/);
+  assert.equal(asks.length, 1);
+});
+
 test("find_references searches through the injected fetch and respects existing bib keys", async (t) => {
   const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-r`);
   t.after(() => rm(dir, { recursive: true, force: true }));

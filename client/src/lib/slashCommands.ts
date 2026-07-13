@@ -67,7 +67,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       "findings, each quoting the exact current text and the file it is in, with your " +
       "proposed rewording — most important first, and skip nitpicks that don't help; (c) " +
       "anything you deliberately left alone (e.g. correct but unusual phrasing).\n" +
-      "4. Finish by asking me which numbers to apply (or 'all') — then WAIT.\n" +
+      "4. Finish by asking me which numbers to apply — use ask_user with choices like " +
+      "'Apply all', 'Only the top findings', 'Nothing yet' — then WAIT.\n" +
       "In a LATER message, once I approve: apply the approved items with edit_document " +
       "(anchoring old_string on the quoted text), run compile_check, and summarize what " +
       "changed. Never change technical meaning, results, or claims while rewording.",
@@ -92,7 +93,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       "(e.g. '⛔ 10 pages of content, limit is 9'); (b) a NUMBERED fix plan for every " +
       "failure, quoting the text or naming the layout change; (c) requirements you could not " +
       "verify, stated as such.\n" +
-      "5. Finish by asking me to approve the plan — then WAIT.\n" +
+      "5. Finish by asking me to approve the plan — use ask_user with choices like 'Apply " +
+      "all fixes', 'Only the blocking ones', 'Not yet' — then WAIT.\n" +
       "In a LATER message, once I approve: apply the fixes with edit_document, then re-run " +
       "view_pdf (and compile_check) to confirm the document now complies, and summarize.",
   },
@@ -132,7 +134,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       "(c) a NUMBERED improvement plan (reorder or reword bullets, surface matching skills and " +
       "keywords I actually have, cut content irrelevant to this role). NEVER propose inventing " +
       "experience, skills, or qualifications I don't have.\n" +
-      "5. Finish by asking me to approve the plan or tell you what to change — then WAIT.\n" +
+      "5. Finish by asking me to approve the plan or tell you what to change — use ask_user " +
+      "with choices like 'Apply the plan', 'Not yet, I'll tell you what to change' — then WAIT.\n" +
       "In a LATER message, once I approve: apply the approved numbered items with " +
       "edit_document, run compile_check, then run ats_check again with the same job " +
       "description to confirm coverage improved, and summarize what changed.",

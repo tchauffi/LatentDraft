@@ -6,6 +6,7 @@ import {
   fetchProjectChat,
   saveProjectChat,
   streamChat,
+  type AskChoices,
   type CheckResult,
   type ProviderInfo,
   type ProposedEdit,
@@ -37,6 +38,10 @@ interface UIMessage {
   activity: ToolActivity[];
   /** Result of the agent's most recent compile_check this turn. */
   check?: CheckResult;
+  /** Question with clickable answer choices (ask_user tool), when the agent asked one. */
+  ask?: AskChoices;
+  /** The choice the user clicked, once answered — keeps the selection visible in history. */
+  askAnswered?: string;
   error?: string;
 }
 
@@ -149,6 +154,7 @@ export default function ChatPane({
     setSlashIndex(0);
   }
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   /** Set once this project's history has loaded — saves are held until then. */
   const hydratedRef = useRef(false);
@@ -323,6 +329,7 @@ export default function ChatPane({
         onCheck: (check) => updateMessage(assistantId, (m) => ({ ...m, check })),
         onTool: (tool) =>
           updateMessage(assistantId, (m) => ({ ...m, activity: [...m.activity, tool] })),
+        onAsk: (ask) => updateMessage(assistantId, (m) => ({ ...m, ask })),
         onError: (msg) => updateMessage(assistantId, (m) => ({ ...m, error: msg })),
         onDone: () => {
           // Fallback: parse fenced latex-edit blocks from the text for models
@@ -528,6 +535,22 @@ export default function ChatPane({
                       onReject={() => onReject(m.id, edit.id)}
                     />
                   ))}
+                  {m.ask && (
+                    <AskBlock
+                      ask={m.ask}
+                      answered={m.askAnswered}
+                      active={
+                        m.id === messages[messages.length - 1]?.id &&
+                        !streaming &&
+                        !m.askAnswered
+                      }
+                      onPick={(option) => {
+                        updateMessage(m.id, (mm) => ({ ...mm, askAnswered: option }));
+                        void send(option);
+                      }}
+                      onOther={() => composerRef.current?.focus()}
+                    />
+                  )}
                   {m.error && <div className="msg-error">⚠ {m.error}</div>}
                   {!m.content && !m.error && m.edits.length === 0 && streaming && (
                     <div className="msg-text dim">
@@ -595,6 +618,7 @@ export default function ChatPane({
             })()}
           </div>
           <textarea
+            ref={composerRef}
             value={input}
             placeholder={
               streaming
@@ -705,6 +729,55 @@ const TOOL_ICON: Record<string, string> = {
   check_bibtex: "📚",
   find_references: "📖",
 };
+
+/**
+ * Clickable answer choices for an agent question (ask_user tool). Clicking a
+ * choice sends it as the next user message; "Other…" focuses the composer for
+ * a custom answer. Only the newest message's block is active — earlier ones
+ * stay visible (with the picked choice highlighted) but inert.
+ */
+function AskBlock({
+  ask,
+  answered,
+  active,
+  onPick,
+  onOther,
+}: {
+  ask: AskChoices;
+  answered?: string;
+  active: boolean;
+  onPick: (option: string) => void;
+  onOther: () => void;
+}) {
+  return (
+    <div className="ask-block">
+      <div className="ask-question">{ask.question}</div>
+      <div className="ask-options">
+        {ask.options.map((option) => (
+          <button
+            key={option}
+            type="button"
+            className={`ask-option${answered === option ? " ask-option-picked" : ""}`}
+            disabled={!active}
+            onClick={() => onPick(option)}
+          >
+            {option}
+          </button>
+        ))}
+        {active && (
+          <button
+            type="button"
+            className="ask-option ask-option-other"
+            onClick={onOther}
+            title="Type your own answer in the box below"
+          >
+            Other…
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function ActivityList({ activity }: { activity: ToolActivity[] }) {
   return (

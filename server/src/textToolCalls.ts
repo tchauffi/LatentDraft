@@ -40,6 +40,7 @@ export function normalizeToolName(raw: string, known: ReadonlySet<string>): stri
   if (/bib|cit/.test(name) || (/check|verify|validate/.test(name) && /ref/.test(name))) {
     return has("check_bibtex");
   }
+  if (/ask|question|choice|choose|clarif|confirm|select_option/.test(name)) return has("ask_user");
   if (/compile|build|check|verify/.test(name)) return has("compile_check");
   if (/python|execute|run_|script|calc/.test(name)) return has("run_python");
   if (/fetch|url|scrape|crawl|visit|open_?page|get_?page|web_?page/.test(name)) return has("fetch_url");
@@ -90,6 +91,14 @@ export function normalizeToolArgs(
     }
     case "view_pdf":
       return typeof args.max_pages === "number" ? { max_pages: args.max_pages } : {};
+    case "ask_user": {
+      const question = str(args.question) ?? str(args.prompt) ?? str(args.q) ?? str(args.text);
+      const options = args.options ?? args.choices ?? args.answers ?? args.buttons;
+      const out: Record<string, unknown> = {};
+      if (question !== undefined) out.question = question;
+      if (Array.isArray(options)) out.options = options.map(String);
+      return out;
+    }
     case "ats_check": {
       const jd = str(args.job_description) ?? str(args.job) ?? str(args.jd) ?? str(args.description);
       return jd !== undefined ? { job_description: jd } : {};
@@ -107,6 +116,8 @@ export function hasRequiredArgs(name: string, args: Record<string, unknown>): bo
     case "web_search":
     case "find_references":
       return typeof args.query === "string";
+    case "ask_user":
+      return typeof args.question === "string" && Array.isArray(args.options);
     case "run_python":
       return typeof args.code === "string";
     case "fetch_url":

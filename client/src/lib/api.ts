@@ -276,11 +276,18 @@ export interface ToolActivity {
   ok: boolean;
 }
 
+/** A question from the agent with clickable answer choices (ask_user tool). */
+export interface AskChoices {
+  question: string;
+  options: string[];
+}
+
 export interface StreamHandlers {
   onText: (text: string) => void;
   onEdit: (edit: ProposedEdit) => void;
   onCheck: (check: CheckResult) => void;
   onTool: (tool: ToolActivity) => void;
+  onAsk: (ask: AskChoices) => void;
   onError: (message: string) => void;
   onDone: () => void;
 }
@@ -356,6 +363,14 @@ export async function streamChat(
           summary: String(evt.summary ?? ""),
           ok: Boolean(evt.ok),
         });
+        break;
+      case "ask":
+        if (Array.isArray(evt.options) && evt.options.length > 0) {
+          handlers.onAsk({
+            question: String(evt.question ?? ""),
+            options: evt.options.map(String),
+          });
+        }
         break;
       case "error":
         handlers.onError(String(evt.message ?? "error"));

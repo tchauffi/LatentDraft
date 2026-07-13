@@ -21,6 +21,7 @@ const KNOWN = new Set([
   "fetch_url",
   "check_bibtex",
   "find_references",
+  "ask_user",
 ]);
 
 /** Run the filter over the input in chunks and return the outcome. */
@@ -156,6 +157,17 @@ test("normalizeToolName routes discovery aliases to find_references, checks to c
   assert.equal(normalizeToolName("verify_citations", KNOWN), "check_bibtex");
   assert.equal(normalizeToolName("check_bibliography", KNOWN), "check_bibtex");
 });
+
+test("normalizeToolName and arg aliases route question-style calls to ask_user", () => {
+  assert.equal(normalizeToolName("ask_question", KNOWN), "ask_user");
+  assert.equal(normalizeToolName("clarify", KNOWN), "ask_user");
+  assert.equal(normalizeToolName("user_choice", KNOWN), "ask_user");
+  assert.deepEqual(
+    normalizeToolArgs("ask_user", { prompt: "Which one?", choices: ["a", "b"] }),
+    { question: "Which one?", options: ["a", "b"] },
+  );
+});
+
 test("normalizeToolArgs maps aliased fetch_url keys onto url", () => {
   assert.deepEqual(normalizeToolArgs("fetch_url", { link: "https://x" }), { url: "https://x" });
   assert.deepEqual(normalizeToolArgs("fetch_url", { href: "https://y" }), { url: "https://y" });

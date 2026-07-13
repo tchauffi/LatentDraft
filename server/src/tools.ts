@@ -46,6 +46,12 @@ export interface ToolEvent {
   ok: boolean;
 }
 
+export interface AskEvent {
+  question: string;
+  /** 2–5 short answer choices, rendered as clickable buttons in the chat. */
+  options: string[];
+}
+
 type ApplyResult =
   | { ok: true; doc: string }
   | { ok: false; reason: "not-found" | "ambiguous" };
@@ -82,6 +88,8 @@ export interface AgentToolsOptions {
   emitCheck: (c: CheckEvent) => void;
   /** Optional: surface non-edit tool activity (search, python, pdf, ats) to the UI. */
   emitTool?: (e: ToolEvent) => void;
+  /** Optional: show the user a question with clickable answer choices (ask_user). */
+  emitAsk?: (a: AskEvent) => void;
   /** Injectable fetch for fetch_url — tests stay offline. */
   fetchFn?: typeof fetch;
 }
@@ -742,6 +750,38 @@ export function createAgentTools(opts: AgentToolsOptions) {
     },
   });
 
+  const ask_user = createTool({
+    id: "ask_user",
+    description:
+      "Ask the user ONE question with 2–5 clickable answer choices, when you need a " +
+      "decision or a missing detail to proceed — which file to work on, whether to apply " +
+      "a plan, which reference candidate to insert, what a venue's page limit is. The " +
+      "choices render as buttons in the chat (with a free-text field for a custom " +
+      "answer). The answer arrives as the NEXT user message, so after calling this, END " +
+      "YOUR TURN and wait. Do not use it for anything already answered in the " +
+      "conversation, and never re-ask the same question.",
+    inputSchema: z.object({
+      question: z.string().describe("The question, one short sentence."),
+      options: z
+        .array(z.string())
+        .min(2)
+        .max(5)
+        .describe("2–5 short, distinct answer choices (put your recommended one first)."),
+    }),
+    execute: async ({ context: { question, options } }) => {
+      const cleaned = options.map((o) => o.trim()).filter(Boolean).slice(0, 5);
+      if (cleaned.length < 2) {
+        return "NOT SHOWN: provide at least 2 non-empty answer choices.";
+      }
+      opts.emitAsk?.({ question: question.trim(), options: cleaned });
+      return (
+        "The question and its answer buttons are now shown to the user. END YOUR TURN " +
+        "NOW with a brief plain-text sentence (do not repeat the options — they are " +
+        "already on screen). The user's answer will arrive as the next message."
+      );
+    },
+  });
+
   /**
    * Authoritative end-of-turn verification. Runs a compile if the document
    * changed since the last check (or was never checked), emits the result, and
@@ -788,6 +828,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       ats_check,
       check_bibtex,
       find_references,
+      ask_user,
     },
     getDoc: () => state.docs.get(MAIN) ?? "",
     /** True once the agent has compiled at least once this turn — after that,
@@ -836,6 +877,7 @@ You have tools:
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
 - check_bibtex(verify_online?): verify the bibliography — every \\cite key vs the .bib entries / \\bibitem definitions, AND each cited entry vs real-world sources (Crossref DOI, arXiv, title search) to catch hallucinated references (invented papers, fake or mismatched DOIs). Use it whenever the user asks about citations/references/bibliography or after writing bibliography entries.
 - find_references(query, max_results?): search Crossref + arXiv for REAL papers on a topic/claim/title and get candidates with ready-to-insert BibTeX. Whenever a new bibliography entry is needed (the user wants a citation, or you want to cite something), get it from find_references — NEVER write a .bib entry from memory.
+- ask_user(question, options): show the user ONE question with 2–5 clickable answer choices (plus a free-text field). Their answer arrives as the NEXT user message — call it, then END YOUR TURN and wait.
 
 Tool guidance:
 - Invoke tools ONLY through the native tool/function-calling mechanism. NEVER print tool-call JSON (like {"name": "edit_document", ...}) or <tool_call> tags as part of your reply text — that is not a tool call and does nothing.
@@ -847,6 +889,7 @@ Tool guidance:
 - When the user needs a CITATION for a claim or topic (e.g. via /find-refs): call find_references (1–3 focused queries), present the candidates (title, authors, year, venue), then insert the best match's BibTeX block into the .bib EXACTLY as returned and add \\cite{key} where the claim is made — each insertion is an accept/reject diff, so the user can reject and pick another candidate. If no candidate genuinely matches, say so; NEVER fabricate an entry or alter a returned block's bibliographic fields.
 - When the user asks to PROOFREAD/review the writing (e.g. via /review): read every relevant file first, then present the findings and a NUMBERED fix plan quoting the exact text at each location, and STOP — do not edit until the user approves.
 - When the user asks whether the document meets SUBMISSION requirements (e.g. via /check-submission): establish the venue's requirements (from what they gave you, or web_search the venue's author guidelines), run view_pdf for the real page count/margins/fonts, read the source for anonymization leaks if required (\\author, emails, \\thanks, acknowledgements, "our previous work"), then report a pass/fail checklist and a NUMBERED fix plan and STOP — do not edit until the user approves.
+- When you are BLOCKED on a decision only the user can make — approve a numbered plan, pick between files, choose a reference candidate, supply a missing detail — ask it with ask_user (recommended choice first) instead of ending the turn with an open question in prose. One focused question per turn; don't ask what the conversation already answers, and don't use it to ask permission for ordinary edits (the accept/reject diff cards are the permission).
 - You do NOT have any other tools (no shell, no file system, no "google"). If you need external info, use web_search.
 
 Workflow when the user reports a BROKEN document ("it doesn't compile", "fix the errors", red log in the editor):
