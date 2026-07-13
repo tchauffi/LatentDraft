@@ -27,6 +27,29 @@ export interface SlashExpansion {
 
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
+    name: "find-refs",
+    description: "Find real papers to cite (Crossref/arXiv) and insert their BibTeX",
+    argLabel: "What to find a source for (topic, claim, or title fragment)",
+    prompt:
+      "I need real, citable references. Use the find_references tool — NEVER write a .bib " +
+      "entry from memory.\n" +
+      "1. Work out what needs a source: if I named a topic/claim below, use that; if I quoted " +
+      "a sentence from my document, that sentence is the claim. If it is genuinely unclear, " +
+      "ask me first.\n" +
+      "2. Call find_references with a focused query (up to 3 queries with different wording " +
+      "if the first finds nothing convincing).\n" +
+      "3. Present the candidates briefly: title, authors, year, venue — and say which one(s) " +
+      "you recommend and why.\n" +
+      "4. Insert the best match's BibTeX block into the project's .bib file EXACTLY as the " +
+      "tool returned it (create the .bib with create_file and reference it from the document " +
+      "if the project has none), and add \\cite{key} where the claim is made — or, if I only " +
+      "gave a topic, just add the entry and tell me the key to cite. Each insertion is an " +
+      "accept/reject diff, so I can reject and pick a different candidate.\n" +
+      "5. Run compile_check (and check_bibtex if you touched existing entries).\n" +
+      "If no candidate truly matches, tell me so — do NOT insert a poor match and NEVER " +
+      "fabricate or alter bibliographic data.",
+  },
+  {
     name: "check-bibtex",
     description: "Verify references: \\cite keys resolve and sources are real (Crossref/arXiv)",
     prompt:

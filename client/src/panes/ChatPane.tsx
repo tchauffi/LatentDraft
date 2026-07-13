@@ -703,6 +703,7 @@ const TOOL_ICON: Record<string, string> = {
   view_pdf: "👁️",
   ats_check: "📋",
   check_bibtex: "📚",
+  find_references: "📖",
 };
 
 function ActivityList({ activity }: { activity: ToolActivity[] }) {

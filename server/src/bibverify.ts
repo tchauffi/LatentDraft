@@ -71,8 +71,8 @@ export function extractArxivId(entry: BibEntry): string | undefined {
   return entry.url?.match(/arxiv\.org\/(?:abs|pdf)\/([^\s}]+?)(?:\.pdf)?$/i)?.[1];
 }
 
-function headers(): Record<string, string> {
-  // Crossref's "polite pool" gives better service when a mailto is supplied.
+/** Crossref request headers — the "polite pool" gives better service when a mailto is supplied. */
+export function politeHeaders(): Record<string, string> {
   const mailto = process.env.CROSSREF_MAILTO;
   return {
     Accept: "application/json",
@@ -85,7 +85,7 @@ async function verifyDoi(entry: BibEntry, doi: string, fetchFn: typeof fetch): P
   let res: Response;
   try {
     res = await fetchFn(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
-      headers: headers(),
+      headers: politeHeaders(),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (err) {
@@ -159,7 +159,7 @@ async function verifyByTitle(entry: BibEntry, fetchFn: typeof fetch): Promise<Ve
   try {
     const res = await fetchFn(
       `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(query)}&rows=3&select=title,DOI,issued`,
-      { headers: headers(), signal: AbortSignal.timeout(TIMEOUT_MS) },
+      { headers: politeHeaders(), signal: AbortSignal.timeout(TIMEOUT_MS) },
     );
     if (!res.ok) return { ...base, verdict: "unverified", detail: `Crossref search returned HTTP ${res.status}.` };
     data = (await res.json()) as typeof data;

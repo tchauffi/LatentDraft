@@ -38,6 +38,18 @@ test("/apply labels its trailing text as the job posting", () => {
   assert.doesNotMatch(exp.prompt, /Additional context from me/);
 });
 
+test("/find-refs expands to the find_references workflow", () => {
+  const exp = expandSlashCommand("/find-refs attention mechanisms in transformers");
+  assert.ok(exp);
+  assert.match(exp.prompt, /find_references/);
+  assert.match(exp.prompt, /NEVER write a \.bib/);
+  assert.match(exp.prompt, /EXACTLY as the\s+tool returned it/);
+  assert.match(
+    exp.prompt,
+    /What to find a source for \(topic, claim, or title fragment\): attention mechanisms in transformers/,
+  );
+});
+
 test("unknown commands and plain text pass through as null", () => {
   assert.equal(expandSlashCommand("/unknown-cmd"), null);
   assert.equal(expandSlashCommand("fix the intro"), null);
@@ -47,11 +59,13 @@ test("unknown commands and plain text pass through as null", () => {
 test("matchSlashCommands offers commands while the name is being typed", () => {
   assert.ok(matchSlashCommands("/").some((c) => c.name === "check-bibtex"));
   assert.ok(matchSlashCommands("/").some((c) => c.name === "apply"));
+  assert.ok(matchSlashCommands("/").some((c) => c.name === "find-refs"));
   assert.equal(matchSlashCommands("/ap").length, 1);
   assert.equal(matchSlashCommands("/ap")[0].name, "apply");
   assert.equal(matchSlashCommands("/che").length, 1);
   assert.equal(matchSlashCommands("/CHE").length, 1);
   assert.equal(matchSlashCommands("/check-bibtex").length, 1);
+  assert.equal(matchSlashCommands("/fi")[0].name, "find-refs");
 });
 
 test("matchSlashCommands closes once the command is complete or off-menu", () => {

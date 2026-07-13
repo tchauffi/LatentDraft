@@ -19,6 +19,8 @@ const KNOWN = new Set([
   "view_pdf",
   "ats_check",
   "fetch_url",
+  "check_bibtex",
+  "find_references",
 ]);
 
 /** Run the filter over the input in chunks and return the outcome. */
@@ -144,6 +146,16 @@ test("normalizeToolName routes fetch-style aliases to fetch_url, not web_search"
   assert.equal(normalizeToolName("browse", KNOWN), "web_search");
 });
 
+test("normalizeToolName routes discovery aliases to find_references, checks to check_bibtex", () => {
+  assert.equal(normalizeToolName("find_papers", KNOWN), "find_references");
+  assert.equal(normalizeToolName("search_references", KNOWN), "find_references");
+  assert.equal(normalizeToolName("lookup_citation", KNOWN), "find_references");
+  assert.equal(normalizeToolName("search_arxiv", KNOWN), "find_references");
+  // Verification-style names still land on check_bibtex.
+  assert.equal(normalizeToolName("check_references", KNOWN), "check_bibtex");
+  assert.equal(normalizeToolName("verify_citations", KNOWN), "check_bibtex");
+  assert.equal(normalizeToolName("check_bibliography", KNOWN), "check_bibtex");
+});
 test("normalizeToolArgs maps aliased fetch_url keys onto url", () => {
   assert.deepEqual(normalizeToolArgs("fetch_url", { link: "https://x" }), { url: "https://x" });
   assert.deepEqual(normalizeToolArgs("fetch_url", { href: "https://y" }), { url: "https://y" });

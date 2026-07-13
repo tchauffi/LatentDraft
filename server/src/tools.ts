@@ -17,8 +17,9 @@ import { renderMermaid, renderMermaidIn } from "./mermaid.js";
 import { renderPdf, extractPdfText, analyzePdfLayout } from "./pdftools.js";
 import { formatLayoutReport } from "./layout.js";
 import { analyzeAts } from "./ats.js";
-import { checkBibtex, type BibEntry } from "./bibcheck.js";
+import { checkBibtex, extractBibEntries, extractBibitems, type BibEntry } from "./bibcheck.js";
 import { verifyEntries, formatVerifyReport, type VerifyResult } from "./bibverify.js";
+import { findReferences, type ExistingRef } from "./refsearch.js";
 import path from "node:path";
 
 const MAIN = "main.tex";
@@ -701,6 +702,46 @@ export function createAgentTools(opts: AgentToolsOptions) {
     },
   });
 
+  const find_references = createTool({
+    id: "find_references",
+    description:
+      "Search real scholarly databases (Crossref + arXiv) for papers matching a topic, a " +
+      "claim that needs a citation, or a half-remembered title. Returns candidates with " +
+      "ready-to-insert BibTeX built verbatim from the real records. ALWAYS use this instead " +
+      "of writing a .bib entry from memory — memory invents papers. Present the candidates " +
+      "to the user, insert the chosen block into the .bib unchanged, and \\cite its key.",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .describe("What to find a source for: a topic, the claim itself, a distinctive title phrase, or author + topic."),
+      max_results: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe("Candidates to return (default 5)."),
+    }),
+    execute: async ({ context: { query, max_results } }) => {
+      // Existing entries: flag candidates already in the bibliography and
+      // keep generated keys from colliding with keys already in use.
+      const files = await gatherBibFiles();
+      const existing: ExistingRef[] = [];
+      for (const [file, content] of Object.entries(files)) {
+        if (/\.bib$/i.test(file)) {
+          for (const e of extractBibEntries(file, content)) {
+            existing.push({ key: e.key, title: e.title, doi: e.doi });
+          }
+        } else {
+          for (const b of extractBibitems(file, content)) existing.push({ key: b.key });
+        }
+      }
+      const res = await findReferences(query, max_results ?? 5, existing, opts.fetchFn ?? fetch);
+      emitTool({ name: "find_references", summary: res.summary, ok: res.ok });
+      return res.report;
+    },
+  });
+
   /**
    * Authoritative end-of-turn verification. Runs a compile if the document
    * changed since the last check (or was never checked), emits the result, and
@@ -746,6 +787,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       view_pdf,
       ats_check,
       check_bibtex,
+      find_references,
     },
     getDoc: () => state.docs.get(MAIN) ?? "",
     /** True once the agent has compiled at least once this turn — after that,
@@ -793,6 +835,7 @@ You have tools:
 - view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm.
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
 - check_bibtex(verify_online?): verify the bibliography — every \\cite key vs the .bib entries / \\bibitem definitions, AND each cited entry vs real-world sources (Crossref DOI, arXiv, title search) to catch hallucinated references (invented papers, fake or mismatched DOIs). Use it whenever the user asks about citations/references/bibliography or after writing bibliography entries.
+- find_references(query, max_results?): search Crossref + arXiv for REAL papers on a topic/claim/title and get candidates with ready-to-insert BibTeX. Whenever a new bibliography entry is needed (the user wants a citation, or you want to cite something), get it from find_references — NEVER write a .bib entry from memory.
 
 Tool guidance:
 - Invoke tools ONLY through the native tool/function-calling mechanism. NEVER print tool-call JSON (like {"name": "edit_document", ...}) or <tool_call> tags as part of your reply text — that is not a tool call and does nothing.
@@ -801,6 +844,7 @@ Tool guidance:
 - Research is for gathering facts, not the goal. Do a FEW focused web_search calls (typically 2–4), then STOP and start writing. Do not keep searching once you have enough to write a solid first draft.
 - For a resume/CV, a good loop is: research briefly → write the document with edit_document → compile_check → view_pdf to sanity-check the layout → ats_check (with the job description if provided) → apply the improvements it suggests. Never fabricate experience to match keywords.
 - When the user asks to TAILOR a resume to a job posting (e.g. via /apply): get the posting text (fetch_url for a URL), run ats_check with it, then present a review and a NUMBERED improvement plan and STOP — do not edit until the user approves. After approval, apply the plan with edit_document, compile_check, and re-run ats_check with the same job description.
+- When the user needs a CITATION for a claim or topic (e.g. via /find-refs): call find_references (1–3 focused queries), present the candidates (title, authors, year, venue), then insert the best match's BibTeX block into the .bib EXACTLY as returned and add \\cite{key} where the claim is made — each insertion is an accept/reject diff, so the user can reject and pick another candidate. If no candidate genuinely matches, say so; NEVER fabricate an entry or alter a returned block's bibliographic fields.
 - You do NOT have any other tools (no shell, no file system, no "google"). If you need external info, use web_search.
 
 Workflow when the user reports a BROKEN document ("it doesn't compile", "fix the errors", red log in the editor):

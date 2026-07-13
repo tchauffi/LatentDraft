@@ -386,6 +386,65 @@ test("fetch_url returns page text through the injected fetch and emits its event
   assert.equal(toolEvents[1].ok, false);
 });
 
+test("find_references searches through the injected fetch and respects existing bib keys", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-r`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const doc = "\\documentclass{article}\\begin{document}x\\end{document}";
+  await writeFile(path.join(dir, "main.tex"), doc);
+  await writeFile(
+    path.join(dir, "refs.bib"),
+    "@misc{vaswani2017attention, title={Placeholder}}\n",
+  );
+
+  const fakeFetch = (async (url: unknown) => {
+    const u = String(url);
+    if (u.includes("api.crossref.org/works?")) {
+      return new Response(
+        JSON.stringify({
+          message: {
+            items: [
+              {
+                title: ["Attention Is All You Need"],
+                author: [{ given: "Ashish", family: "Vaswani" }],
+                issued: { "date-parts": [[2017]] },
+                DOI: "10.5555/3295222",
+                "container-title": ["NeurIPS"],
+                type: "proceedings-article",
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response("<feed></feed>", { status: 200 });
+  }) as typeof fetch;
+
+  const toolEvents: { name: string; summary: string; ok: boolean }[] = [];
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-refs-test",
+    projectDir: dir,
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => toolEvents.push(e),
+    fetchFn: fakeFetch,
+  });
+
+  assert.ok(agent.tools.find_references, "find_references is registered");
+  assert.match(buildSystemPrompt("x"), /find_references/);
+
+  const report = String(await exec(agent.tools.find_references, { query: "attention" }));
+  // The generated key steps around the key already taken in refs.bib.
+  assert.match(report, /@inproceedings\{vaswani2017attentionb,/);
+  assert.match(report, /doi = \{10.5555\/3295222\}/);
+  assert.equal(toolEvents.length, 1);
+  assert.equal(toolEvents[0].name, "find_references");
+  assert.equal(toolEvents[0].ok, true);
+  assert.match(toolEvents[0].summary, /1 reference candidate/);
+});
+
 test("finalizeBib stays inactive when the agent edited without ever checking", async (t) => {
   const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-g`);
   t.after(() => rm(dir, { recursive: true, force: true }));
