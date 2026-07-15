@@ -17,6 +17,8 @@ import {
   saveProjectFile,
   renameProjectFileApi,
   deleteProjectFileApi,
+  createProjectDirApi,
+  deleteProjectDirApi,
   compileProjectApi,
   projectFileUrl,
   synctexForward,
@@ -56,6 +58,9 @@ export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
   const [files, setFiles] = useState<Record<string, string>>({});
   const [binaryFiles, setBinaryFiles] = useState<string[]>([]);
+  // Directories reported by the server — includes EMPTY folders, which can't
+  // be derived from file paths.
+  const [projectDirs, setProjectDirs] = useState<string[]>([]);
 
   const [active, setActive] = useState<string>(MAIN);
   // Tabs are OPEN buffers, not a mirror of the project: the tree opens them,
@@ -183,8 +188,9 @@ export default function App() {
     } catch {
       return;
     }
-    setBinaryFiles(list.filter((f) => f.binary).map((f) => f.path));
-    const texts = list.filter((f) => !f.binary);
+    setBinaryFiles(list.files.filter((f) => f.binary).map((f) => f.path));
+    setProjectDirs(list.dirs);
+    const texts = list.files.filter((f) => !f.binary);
     const updates: Record<string, string> = {};
     await Promise.all(
       texts.map(async (f) => {
@@ -207,7 +213,7 @@ export default function App() {
     const texts: Record<string, string> = {};
     const mt: Record<string, number> = {};
     await Promise.all(
-      list
+      list.files
         .filter((f) => !f.binary)
         .map(async (f) => {
           const r = await fetchProjectFileText(id, f.path);
@@ -222,7 +228,8 @@ export default function App() {
     projectRef.current = id;
     lastCompileRef.current = null;
     setProjectId(id);
-    setBinaryFiles(list.filter((f) => f.binary).map((f) => f.path));
+    setBinaryFiles(list.files.filter((f) => f.binary).map((f) => f.path));
+    setProjectDirs(list.dirs);
     setFiles(texts); // triggers the debounced initial compile
     setOpenTabs([MAIN]);
     setActive(MAIN);
@@ -435,24 +442,32 @@ export default function App() {
     setActive((a) => (a === f ? MAIN : a));
   }, []);
 
-  const newFile = useCallback(async () => {
-    const id = projectRef.current;
-    if (!id) return;
-    const path = window.prompt("New file path (e.g. sections/method.tex):")?.trim();
-    if (!path) return;
-    if (filesRef.current[path] !== undefined) {
+  /** Create a file or an (empty) folder from the tree's inline input row.
+   * Returns an error message for the row to show, or null on success. */
+  const createEntry = useCallback(
+    async (path: string, kind: "file" | "dir"): Promise<string | null> => {
+      const id = projectRef.current;
+      if (!id) return "No project open.";
+      if (kind === "dir") {
+        const r = await createProjectDirApi(id, path);
+        if (!r.ok) return r.error ?? "Could not create the folder.";
+        await refreshProjectFiles();
+        setProjectDirs((d) => (d.includes(path) ? d : [...d, path].sort()));
+        return null;
+      }
+      if (filesRef.current[path] !== undefined) {
+        openFile(path); // already exists — just open it, like VS Code
+        return null;
+      }
+      const r = await saveProjectFile(id, path, "");
+      if (!r.ok) return "error" in r ? r.error : "Could not create the file.";
+      mtimes.current[path] = r.mtimeMs;
+      setFiles((f) => ({ ...f, [path]: "" }));
       openFile(path);
-      return;
-    }
-    const r = await saveProjectFile(id, path, "");
-    if (!r.ok) {
-      window.alert("error" in r ? r.error : "Could not create the file.");
-      return;
-    }
-    mtimes.current[path] = r.mtimeMs;
-    setFiles((f) => ({ ...f, [path]: "" }));
-    openFile(path);
-  }, [openFile]);
+      return null;
+    },
+    [openFile, refreshProjectFiles],
+  );
 
   const renameFile = useCallback(
     async (path: string) => {
@@ -504,6 +519,61 @@ export default function App() {
       void refreshProjectFiles();
     },
     [closeTab],
+  );
+
+  /** Rename a folder: one fs.rename server-side, then remap every piece of
+   * state keyed by the old path prefix (buffers, mtimes, dirty, tabs). */
+  const renameDir = useCallback(
+    async (path: string) => {
+      const id = projectRef.current;
+      if (!id) return;
+      const to = window.prompt("Rename folder to:", path)?.trim().replace(/\/+$/, "");
+      if (!to || to === path) return;
+      await saveDirty(); // rename what's on disk, not a stale copy
+      const r = await renameProjectFileApi(id, path, to);
+      if (!r.ok) {
+        window.alert(r.error ?? "Rename failed.");
+        return;
+      }
+      const prefix = `${path}/`;
+      const move = (p: string) => (p.startsWith(prefix) ? `${to}/${p.slice(prefix.length)}` : p);
+      setFiles((f) =>
+        Object.fromEntries(Object.entries(f).map(([p, content]) => [move(p), content])),
+      );
+      mtimes.current = Object.fromEntries(
+        Object.entries(mtimes.current).map(([p, mt]) => [move(p), mt]),
+      );
+      dirty.current = new Set([...dirty.current].map(move));
+      setOpenTabs((tabs) => tabs.map(move));
+      setActive(move);
+      setProjectDirs((dirs) => dirs.map((d) => (d === path ? to : move(d))).sort());
+      void refreshProjectFiles();
+    },
+    [saveDirty, refreshProjectFiles],
+  );
+
+  /** Delete a folder and everything in it. */
+  const deleteDir = useCallback(
+    async (path: string) => {
+      const id = projectRef.current;
+      if (!id) return;
+      if (!window.confirm(`Delete the folder ${path} and everything in it?`)) return;
+      const r = await deleteProjectDirApi(id, path);
+      if (!r.ok) {
+        window.alert(r.error ?? "Delete failed.");
+        return;
+      }
+      const prefix = `${path}/`;
+      const gone = (p: string) => p.startsWith(prefix);
+      setFiles((f) => Object.fromEntries(Object.entries(f).filter(([p]) => !gone(p))));
+      for (const p of Object.keys(mtimes.current)) if (gone(p)) delete mtimes.current[p];
+      dirty.current = new Set([...dirty.current].filter((p) => !gone(p)));
+      setOpenTabs((tabs) => tabs.filter((t) => !gone(t)));
+      setActive((a) => (gone(a) ? MAIN : a));
+      setProjectDirs((dirs) => dirs.filter((d) => d !== path && !gone(d)));
+      void refreshProjectFiles();
+    },
+    [refreshProjectFiles],
   );
 
   const applyEdit = useCallback(
@@ -606,15 +676,18 @@ export default function App() {
                 onCursor={setCursor}
                 files={openTabs}
                 projectFiles={projectFiles}
+                projectDirs={projectDirs}
                 active={active}
                 onSelect={openFile}
                 onCloseTab={closeTab}
                 generatedFiles={binaryFiles}
                 fileUrl={fileUrl}
                 onUpload={uploadFile}
-                onNewFile={() => void newFile()}
+                onCreateEntry={createEntry}
                 onRenameFile={(f) => void renameFile(f)}
                 onDeleteFile={(f) => void deleteFile(f)}
+                onRenameDir={(d) => void renameDir(d)}
+                onDeleteDir={(d) => void deleteDir(d)}
                 suggestions={pendingEdits.filter((e) => (e.file ?? MAIN) === active)}
                 onAcceptSuggestion={acceptSuggestion}
                 onRejectSuggestion={rejectSuggestion}

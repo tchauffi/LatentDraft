@@ -99,10 +99,40 @@ export async function deleteProjectApi(id: string): Promise<{ ok: boolean; error
   return res.ok ? { ok: true } : { ok: false, error: data.error };
 }
 
-export async function fetchProjectFiles(id: string): Promise<ProjectFileInfo[]> {
+export async function fetchProjectFiles(
+  id: string,
+): Promise<{ files: ProjectFileInfo[]; dirs: string[] }> {
   const res = await fetch(`/api/projects/${encodeURIComponent(id)}/files`);
   if (!res.ok) throw new Error(`project files: ${res.status}`);
-  return ((await res.json()) as { files: ProjectFileInfo[] }).files;
+  const data = (await res.json()) as { files: ProjectFileInfo[]; dirs?: string[] };
+  return { files: data.files, dirs: data.dirs ?? [] };
+}
+
+/** Create a directory — empty folders are real project entries. */
+export async function createProjectDirApi(
+  id: string,
+  path: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/dir`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error };
+}
+
+/** Delete a directory and everything in it. */
+export async function deleteProjectDirApi(
+  id: string,
+  path: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(
+    `/api/projects/${encodeURIComponent(id)}/dir?path=${encodeURIComponent(path)}`,
+    { method: "DELETE" },
+  );
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error };
 }
 
 export function projectFileUrl(id: string, path: string): string {

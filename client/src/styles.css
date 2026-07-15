@@ -396,10 +396,58 @@ body {
   color: var(--text);
 }
 .filetree-dir {
-  cursor: default;
+  cursor: pointer;
 }
 .filetree-dir:hover {
-  color: var(--text-dim);
+  color: var(--text);
+}
+.filetree-chevron {
+  flex: none;
+  margin-right: -3px;
+  transform: rotate(90deg);
+  transition: transform 0.12s ease;
+}
+.filetree-chevron-collapsed {
+  transform: rotate(0deg);
+}
+.filetree-dir-actions {
+  display: none;
+  margin-left: auto;
+  align-items: center;
+  gap: 1px;
+}
+.filetree-dir:hover .filetree-dir-actions {
+  display: flex;
+}
+.filetree-dir-actions .filetree-action {
+  width: 16px;
+  height: 16px;
+  font-size: 10.5px;
+}
+.filetree-create {
+  padding: 2px 10px 4px;
+}
+.filetree-create-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.filetree-create-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  padding: 2px 5px;
+  outline: none;
+}
+.filetree-create-err {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: #d05a4a;
+  white-space: normal;
 }
 .filetree-active {
   color: var(--text);

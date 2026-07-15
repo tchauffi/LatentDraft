@@ -166,7 +166,8 @@ bin/      tectonic binary, fetched by npm run setup (gitignored)
 
 ## Notes & limits
 
-- The editor's file tabs (`main.tex`, `refs.bib`, `sections/…`) are all sent along on every compile, so `\input` and `\bibliography` resolve — for both the live preview and the agent's `compile_check` sandbox. The agent reads and edits **any project file**, and the file tree supports creating, renaming, and deleting files.
+- The editor's file tabs (`main.tex`, `refs.bib`, `sections/…`) are all sent along on every compile, so `\input` and `\bibliography` resolve — for both the live preview and the agent's `compile_check` sandbox. The agent reads and edits **any project file**.
+- The file tree works like VS Code's: create files of **any text type** (`.tex`, `.py`, `.md`, `.yml`, `.json`, `.sh`, …) or **folders** (including empty ones) via inline naming — `/` in the name nests; folders collapse/expand on click and can be renamed or deleted (with contents) from their hover actions. Python, Markdown, YAML, JSON, and shell buffers get syntax highlighting; `.tex` additionally keeps LaTeX autocomplete, compile squiggles, and SyncTeX.
 - Stale compile dirs under `server/tmp/` are deleted automatically after 24h (on server start).
 - The document is sent to the model on each chat turn; very large documents may exceed a local model's context window.
 
