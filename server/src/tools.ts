@@ -139,6 +139,15 @@ export function createAgentTools(opts: AgentToolsOptions) {
     /** true once ask_user ran this turn: the user must answer before anything
      * else changes, so mutating tools refuse and chat.ts ends the turn. */
     asked: false,
+    /** true once a vision model got rendered pages this turn (view_pdf). */
+    viewed: false,
+    /** Page budget of the last view_pdf — the recheck re-renders as many, so
+     * a 12-page deck review is re-verified on all 12 pages, not 3. */
+    lastViewPages: 3,
+    /** Edits applied since the model last SAW the pages — drives the
+     * end-of-turn visual recheck, so a fix made from the images is itself
+     * verified visually instead of taken on faith. */
+    editsSinceView: 0,
   };
   let editSeq = 0;
   /** Signatures of edits already applied this turn — weak models love to repeat themselves. */
@@ -147,6 +156,28 @@ export function createAgentTools(opts: AgentToolsOptions) {
   const projectDir = opts.projectDir;
   /** Where run_python / render_mermaid write figures. */
   const workDir = projectDir ?? sessionDir(opts.compileSessionId);
+
+  /**
+   * Queue freshly produced image files for the vision feedback message —
+   * chat.ts attaches whatever is pending once the round ends, so a vision
+   * model SEES the figure it just generated and can iterate on it.
+   * No-op for text-only models. Returns how many images were queued.
+   */
+  async function queueImagesForVision(names: string[]): Promise<number> {
+    if (!opts.vision) return 0;
+    let queued = 0;
+    for (const name of names.filter((n) => /\.(png|jpe?g)$/i.test(n)).slice(0, 4)) {
+      try {
+        const buf = await readFile(path.join(workDir, name));
+        if (buf.byteLength > 4 * 1024 * 1024) continue; // don't flood the context
+        state.renderedImages.push(buf.toString("base64"));
+        queued++;
+      } catch {
+        /* unreadable — skip it */
+      }
+    }
+    return queued;
+  }
 
   /** Resolve a tool's `file` argument to a normalized project path, or an error string. */
   function resolveTarget(file: string | undefined): { path: string } | { error: string } {
@@ -326,6 +357,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       }
       state.docs.set(target.path, res.doc);
       state.edits += 1;
+      state.editsSinceView += 1;
       state.dirty = true;
       if (/\.(tex|bib)$/i.test(target.path)) state.bibDirty = true;
       appliedSigs.add(sig);
@@ -421,6 +453,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       }
       state.docs.set(norm, content);
       state.edits += 1;
+      state.editsSinceView += 1;
       state.dirty = true;
       if (/\.(tex|bib)$/i.test(norm)) state.bibDirty = true;
       const id = `edit-${++editSeq}`;
@@ -533,16 +566,22 @@ export function createAgentTools(opts: AgentToolsOptions) {
       const filesLine = res.createdFiles.length
         ? `\n\nFiles created (reference by bare filename in \\includegraphics): ${res.createdFiles.join(", ")}`
         : "\n\n(No new files were created.)";
+      const queued = await queueImagesForVision(res.createdFiles);
       emitTool({
         name: "run_python",
         summary: res.createdFiles.length
-          ? `Ran Python → ${res.createdFiles.join(", ")}`
+          ? `Ran Python → ${res.createdFiles.join(", ")}${queued ? " — figure attached" : ""}`
           : "Ran Python",
         ok: res.ok,
       });
+      const seeNote = queued
+        ? "\n\nThe generated figure(s) are attached as images in the next message — LOOK at " +
+          "them and check they are correct and readable (labels, legends, axes, nothing cut " +
+          "off or overlapping). Regenerate with fixed code if not."
+        : "";
       return `${res.ok ? "Python ran successfully." : "Python exited with an error."}\n\nOutput:\n${
         res.output || "(no output)"
-      }${filesLine}`;
+      }${filesLine}${seeNote}`;
     },
   });
 
@@ -567,13 +606,20 @@ export function createAgentTools(opts: AgentToolsOptions) {
       const res = projectDir
         ? await renderMermaidIn(projectDir, code, filename)
         : await renderMermaid(opts.compileSessionId, code, filename);
+      const queued = res.ok && res.file ? await queueImagesForVision([res.file]) : 0;
       emitTool({
         name: "render_mermaid",
-        summary: res.ok ? `Rendered diagram → ${res.file}` : "Mermaid render failed",
+        summary: res.ok
+          ? `Rendered diagram → ${res.file}${queued ? " — diagram attached" : ""}`
+          : "Mermaid render failed",
         ok: res.ok,
       });
+      const seeNote = queued
+        ? ` The rendered diagram is attached as an image in the next message — LOOK at it and ` +
+          `check the structure, labels, and readability; re-render with fixed source if not.`
+        : "";
       return res.ok
-        ? `Diagram rendered to ${res.file}. Now add it to the document with edit_document, ` +
+        ? `Diagram rendered to ${res.file}.${seeNote} Now add it to the document with edit_document, ` +
             `e.g. \\includegraphics[width=0.9\\textwidth]{${res.file}} (inside a figure ` +
             `environment if it needs a caption), then compile_check.`
         : `Mermaid rendering FAILED. Fix the diagram source and call render_mermaid again.\n\n${res.output}`;
@@ -590,47 +636,75 @@ export function createAgentTools(opts: AgentToolsOptions) {
       "near-empty trailing pages, and font usage. Call it after formatting changes or " +
       "when the user asks about layout/appearance, then FIX the issues it reports.",
     inputSchema: z.object({
-      max_pages: z.number().int().min(1).max(5).optional().describe("Pages to render (default 3)."),
+      max_pages: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe(
+          "Pages to render (default 3). Reviewing a whole slide deck or long document? " +
+            "Pass its full page count so you see EVERY page, up to 20.",
+        ),
     }),
     execute: async ({ context: { max_pages } }) => {
       state.renderedImages = [];
-      const compiled = await compileToPdf();
-      if (!compiled.ok) {
+      state.lastViewPages = max_pages ?? 3;
+      const r = await renderPages(state.lastViewPages);
+      if (!r.ok) {
         emitTool({ name: "view_pdf", summary: "Could not render — compile failed", ok: false });
-        return `Cannot view the PDF — it does not compile:\n\n${compiled.log}`;
+        return `Cannot view the PDF — it does not compile:\n\n${r.log}`;
       }
-      let report = "";
-      try {
-        const layout = await analyzePdfLayout(compiled.pdf);
-        report = formatLayoutReport(layout, compiled.log);
-      } catch (err) {
-        report = `(layout analysis failed: ${String(err)})`;
-      }
-      let rendered = 0;
-      try {
-        const prefix = projectDir
-          ? path.join(projectDir, ".latentdraft", "preview")
-          : path.join(sessionDir(opts.compileSessionId), "preview");
-        // Vision models READ the pages, not just measure them — render sharper.
-        const pages = await renderPdf(compiled.pdf, prefix, max_pages ?? 3, opts.vision ? 150 : 110);
-        state.renderedImages = pages.map((p) => p.base64);
-        rendered = pages.length;
+      state.renderedImages = r.images;
+      if (r.images.length > 0) {
+        if (opts.vision) {
+          state.viewed = true;
+          state.editsSinceView = 0;
+        }
         emitTool({
           name: "view_pdf",
-          summary: `Inspected layout (${pages.length} page(s) rendered${opts.vision ? " — pages attached" : ""})`,
+          summary: `Inspected layout (${r.images.length} page(s) rendered${opts.vision ? " — pages attached" : ""})`,
           ok: true,
         });
-      } catch {
+      } else {
         emitTool({ name: "view_pdf", summary: "Inspected layout (render failed)", ok: true });
       }
       const visionNote =
-        opts.vision && rendered > 0
+        opts.vision && r.images.length > 0
           ? "\n\nThe rendered page images are attached in the next message — inspect them " +
-            "before deciding the layout is fine."
+            "before deciding the layout is fine. If you then edit based on what you see, " +
+            "run view_pdf again afterward to visually confirm the fix."
           : "";
-      return `Compiled successfully. Layout report:\n${report}${visionNote}`;
+      return `Compiled successfully. Layout report:\n${r.report}${visionNote}`;
     },
   });
+
+  /**
+   * Compile the working state and render its first pages — the shared engine
+   * behind view_pdf and the end-of-turn vision recheck.
+   */
+  async function renderPages(
+    maxPages: number,
+  ): Promise<{ ok: true; report: string; images: string[] } | { ok: false; log: string }> {
+    const compiled = await compileToPdf();
+    if (!compiled.ok) return { ok: false, log: compiled.log };
+    let report = "";
+    try {
+      report = formatLayoutReport(await analyzePdfLayout(compiled.pdf), compiled.log);
+    } catch (err) {
+      report = `(layout analysis failed: ${String(err)})`;
+    }
+    try {
+      const prefix = projectDir
+        ? path.join(projectDir, ".latentdraft", "preview")
+        : path.join(sessionDir(opts.compileSessionId), "preview");
+      // Vision models READ the pages, not just measure them — render sharper.
+      const pages = await renderPdf(compiled.pdf, prefix, maxPages, opts.vision ? 150 : 110);
+      return { ok: true, report, images: pages.map((p) => p.base64) };
+    } catch {
+      return { ok: true, report, images: [] };
+    }
+  }
 
   const ats_check = createTool({
     id: "ats_check",
@@ -882,6 +956,28 @@ export function createAgentTools(opts: AgentToolsOptions) {
     return runBibCheck(state.bibOnline);
   }
 
+  /**
+   * End-of-turn visual recheck, mirroring finalize()/finalizeBib(): a vision
+   * model that edited AFTER seeing the rendered pages must look at the result
+   * of its own fix. Re-compiles and re-renders; chat.ts feeds the pages back
+   * for one more look. Returns undefined when the document no longer compiles
+   * (the compile enforcement owns that) or nothing could be rendered.
+   */
+  async function renderForVisionRecheck(): Promise<
+    { report: string; images: string[] } | undefined
+  > {
+    const r = await renderPages(state.lastViewPages);
+    if (!r.ok || r.images.length === 0) return undefined;
+    state.viewed = true;
+    state.editsSinceView = 0;
+    opts.emitTool?.({
+      name: "view_pdf",
+      summary: `Re-rendered after edits (${r.images.length} page(s) — pages attached)`,
+      ok: true,
+    });
+    return { report: r.report, images: r.images };
+  }
+
   return {
     tools: {
       edit_document,
@@ -908,12 +1004,15 @@ export function createAgentTools(opts: AgentToolsOptions) {
     hasChecked: () => state.lastCheck !== undefined,
     /** True once ask_user ran this turn — the turn must end and wait for the answer. */
     hasAsked: () => state.asked,
-    /** Base64 PNG pages from the most recent view_pdf; clears on read. */
+    /** Pending vision images (view_pdf pages, generated figures); clears on read. */
     takeRenderedImages: (): string[] => {
       const imgs = state.renderedImages;
       state.renderedImages = [];
       return imgs;
     },
+    /** True when a vision model edited after its last look at the pages. */
+    needsVisionRecheck: () => state.viewed && state.editsSinceView > 0,
+    renderForVisionRecheck,
     finalize,
     finalizeBib,
   };
@@ -956,7 +1055,7 @@ You have tools:
 - fetch_url(url): fetch one specific web page and get its readable text. Use it when you HAVE a URL (a job posting, an article) — web_search finds pages, fetch_url reads one. If it returns little or no text (login wall, scripted page), ask the user to paste the content instead of guessing.
 - run_python(code): run Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Uploaded data files (CSV/Excel) are in the same directory: pd.read_csv("data.csv") / pd.read_excel("data.xlsx"), then plot with seaborn. Reference files by bare filename; do not call plt.show().
 - render_mermaid(code, filename?): render a Mermaid DIAGRAM (flowchart, sequence, class, state, ER, gantt, pie, mindmap) to a PNG in the build directory. Prefer it over Python for conceptual/structural diagrams. Pass raw Mermaid source (no fences), then edit_document to add \\includegraphics{<filename>}.
-- view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm.
+- view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm. Reviewing a slide deck or a whole multi-page document? Pass max_pages set to its page count (up to 20) so EVERY page is inspected — the default renders only the first 3.
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
 - check_bibtex(verify_online?): verify the bibliography — every \\cite key vs the .bib entries / \\bibitem definitions, AND each cited entry vs real-world sources (Crossref DOI, arXiv, title search) to catch hallucinated references (invented papers, fake or mismatched DOIs). Use it whenever the user asks about citations/references/bibliography or after writing bibliography entries.
 - find_references(query, max_results?): search Crossref + arXiv for REAL papers on a topic/claim/title and get candidates with ready-to-insert BibTeX. Whenever a new bibliography entry is needed (the user wants a citation, or you want to cite something), get it from find_references — NEVER write a .bib entry from memory.

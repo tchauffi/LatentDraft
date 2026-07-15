@@ -602,3 +602,77 @@ test("view_pdf attaches pages for vision models and says so", async () => {
   const plain = String(await exec(textOnly.tools.view_pdf, {}));
   assert.doesNotMatch(plain, /attached in the next message/);
 });
+
+test("vision recheck: edits after looking trigger a re-render, which resets it", async () => {
+  const doc = "\\documentclass{article}\\begin{document}recheck test\\end{document}";
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-recheck-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    vision: true,
+  });
+  assert.equal(agent.needsVisionRecheck(), false, "nothing viewed yet");
+
+  await exec(agent.tools.view_pdf, {});
+  agent.takeRenderedImages();
+  assert.equal(agent.needsVisionRecheck(), false, "viewed but nothing edited since");
+
+  await exec(agent.tools.edit_document, {
+    explanation: "x",
+    old_string: "recheck test",
+    new_string: "recheck TEST",
+  });
+  assert.equal(agent.needsVisionRecheck(), true, "edited after looking");
+
+  const r = await agent.renderForVisionRecheck();
+  assert.ok(r, "recheck renders the updated document");
+  assert.ok(r!.images.length > 0, "recheck returns page images");
+  assert.equal(typeof r!.report, "string");
+  assert.equal(agent.needsVisionRecheck(), false, "the new look resets the recheck");
+});
+
+test("vision recheck never triggers for text-only models", async () => {
+  const doc = "\\documentclass{article}\\begin{document}plain\\end{document}";
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-recheck-novision",
+    emitEdit: () => {},
+    emitCheck: () => {},
+  });
+  await exec(agent.tools.view_pdf, {});
+  await exec(agent.tools.edit_document, {
+    explanation: "x",
+    old_string: "plain",
+    new_string: "PLAIN",
+  });
+  assert.equal(agent.needsVisionRecheck(), false);
+});
+
+test("run_python figures are attached for vision models", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-vfig`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, "main.tex"), "\\documentclass{article}\\begin{document}x\\end{document}");
+  const events: { name: string; summary: string; ok: boolean }[] = [];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-vfig-test",
+    projectDir: dir,
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => events.push(e),
+    vision: true,
+  });
+  const out = String(
+    await exec(agent.tools.run_python, {
+      code:
+        "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n" +
+        "plt.plot([1,2,3],[1,4,9])\nplt.savefig('curve.png', dpi=100)\n",
+    }),
+  );
+  assert.match(out, /attached as images in the next message/);
+  assert.match(events.at(-1)!.summary, /figure attached/);
+  const imgs = agent.takeRenderedImages();
+  assert.ok(imgs.length > 0, "the generated PNG is pending for the vision message");
+});
