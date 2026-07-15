@@ -20,6 +20,7 @@ import { analyzeAts } from "./ats.js";
 import { checkBibtex, extractBibEntries, extractBibitems, type BibEntry } from "./bibcheck.js";
 import { verifyEntries, formatVerifyReport, type VerifyResult } from "./bibverify.js";
 import { findReferences, type ExistingRef } from "./refsearch.js";
+import type { Skill } from "./skills.js";
 import path from "node:path";
 
 const MAIN = "main.tex";
@@ -96,6 +97,9 @@ export interface AgentToolsOptions {
   emitTool?: (e: ToolEvent) => void;
   /** Optional: show the user a question with clickable answer choices (ask_user). */
   emitAsk?: (a: AskEvent) => void;
+  /** User-authored SKILL.md instruction packs; when non-empty, the model gets a
+   * `skill` tool to load one and the system prompt lists them. */
+  skills?: Skill[];
   /** Injectable fetch for fetch_url — tests stay offline. */
   fetchFn?: typeof fetch;
 }
@@ -801,6 +805,37 @@ export function createAgentTools(opts: AgentToolsOptions) {
     },
   });
 
+  // User-authored SKILL.md packs. Skill names are [a-z-] and every tool id
+  // contains an underscore, so a skill can never shadow a tool.
+  const skills = opts.skills ?? [];
+  const skillList = () =>
+    skills.map((s) => `${s.name} — ${s.description}`).join("\n");
+  const skill = createTool({
+    id: "skill",
+    description:
+      "Load a user-installed skill: a reusable instruction pack for a specific kind of " +
+      "task. Call it when the user invokes /<skill-name> or when their request matches a " +
+      "skill's description (the system prompt lists them), then follow the returned " +
+      "instructions for the rest of the turn.",
+    inputSchema: z.object({
+      name: z.string().describe("The skill's name, exactly as listed."),
+    }),
+    execute: async ({ context: { name } }) => {
+      const found = skills.find((s) => s.name === name.trim().toLowerCase());
+      if (!found) {
+        opts.emitTool?.({ name: "skill", summary: `unknown skill '${name}'`, ok: false });
+        return skills.length
+          ? `Unknown skill '${name}'. Installed skills:\n${skillList()}`
+          : "No skills are installed.";
+      }
+      opts.emitTool?.({ name: "skill", summary: `loaded ${found.name}`, ok: true });
+      return (
+        `Instructions from skill '${found.name}' — follow them for the current task:\n\n` +
+        found.body
+      );
+    },
+  });
+
   /**
    * Authoritative end-of-turn verification. Runs a compile if the document
    * changed since the last check (or was never checked), emits the result, and
@@ -848,6 +883,9 @@ export function createAgentTools(opts: AgentToolsOptions) {
       check_bibtex,
       find_references,
       ask_user,
+      // Only offered when skills exist — a tool that can only say "none
+      // installed" would just invite pointless calls.
+      ...(skills.length ? { skill } : {}),
     },
     getDoc: () => state.docs.get(MAIN) ?? "",
     /** True once the agent has compiled at least once this turn — after that,
@@ -873,11 +911,20 @@ export function buildSystemPrompt(
   editorCompileLog?: string,
   /** True when the agent works on a project: file param + create_file available. */
   multiFile = false,
+  /** Installed SKILL.md packs, listed so the model knows when to load one. */
+  skills: Pick<Skill, "name" | "description">[] = [],
 ): string {
   const auxNote = auxFiles.length
     ? multiFile
       ? `\n\nProject files besides main.tex: ${auxFiles.join(", ")}. Read any text file with read_document({file: "…"}) and edit it with edit_document({file: "…", …}); create new ones with create_file. Files resolve relative to the project root (\\input{sections/intro}, \\bibliography{refs}, \\includegraphics{figure.png}).`
       : `\n\nThe compile directory also contains these project files (usable via \\input, \\bibliography, \\includegraphics): ${auxFiles.join(", ")}. You can only edit main.tex.`
+    : "";
+  const skillsNote = skills.length
+    ? `\n\nInstalled skills (user-authored instruction packs), loadable with the skill tool:\n${skills
+        .map((s) => `- ${s.name}: ${s.description}`)
+        .join(
+          "\n",
+        )}\nWhen the user invokes /<skill-name>, or their request matches a skill's description, call skill({name}) FIRST and follow the returned instructions for the rest of the turn. Do not guess at a skill's content — load it.`
     : "";
   const compileNote = editorCompileLog
     ? `\n\nWhen the user sent this message, the editor's last compile of this document had FAILED with the log below. Base your fix on it: fix the reported cause with edit_document, then compile_check until it succeeds.\n<compile_log>\n${truncate(editorCompileLog, 2000)}\n</compile_log>`
@@ -939,5 +986,5 @@ Rules:
 Current document:
 <document>
 ${documentText}
-</document>${auxNote}${compileNote}`;
+</document>${auxNote}${skillsNote}${compileNote}`;
 }

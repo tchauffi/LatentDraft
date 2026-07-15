@@ -1,3 +1,5 @@
+import type { SkillInfo } from "./slashCommands";
+
 export interface ProviderInfo {
   id: "ollama" | "ollama-cloud" | "openai-compatible" | "anthropic";
   label: string;
@@ -258,6 +260,15 @@ export async function fetchProviders(): Promise<ProviderInfo[]> {
   if (!res.ok) throw new Error(`providers: ${res.status}`);
   const data = (await res.json()) as { providers: ProviderInfo[] };
   return data.providers;
+}
+
+/** Installed SKILL.md packs — become slash commands and agent-loadable skills. */
+export async function fetchSkills(projectId?: string): Promise<SkillInfo[]> {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  const res = await fetch(`/api/skills${qs}`);
+  if (!res.ok) throw new Error(`skills: ${res.status}`);
+  const data = (await res.json()) as { skills: SkillInfo[] };
+  return data.skills;
 }
 
 export interface ChatMessage {

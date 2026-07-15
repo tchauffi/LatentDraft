@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import {
   fetchProviders,
   fetchProjectChat,
+  fetchSkills,
   saveProjectChat,
   streamChat,
   type AskChoices,
@@ -20,7 +21,12 @@ import {
   stripLatexDocBlock,
   type ApplyResult,
 } from "../lib/diff";
-import { expandSlashCommand, matchSlashCommands } from "../lib/slashCommands";
+import {
+  expandSlashCommand,
+  matchSlashCommands,
+  skillToSlashCommand,
+  type SlashCommand,
+} from "../lib/slashCommands";
 
 interface EditCard extends ProposedEdit {
   status: "pending" | "applied" | "rejected" | "failed";
@@ -144,10 +150,26 @@ export default function ChatPane({
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  // Installed SKILL.md packs, presented as extra slash commands. The pane is
+  // remounted per project, so one fetch covers this project's skill set.
+  const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchSkills(projectId ?? undefined)
+      .then((skills) => {
+        if (!cancelled) setSkillCommands(skills.map(skillToSlashCommand));
+      })
+      .catch(() => {}); // no skills endpoint / no skills — built-ins still work
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Slash-command autocomplete: open while the input is a partial /name.
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
-  const slashMatches = streaming || slashDismissed ? [] : matchSlashCommands(input);
+  const slashMatches = streaming || slashDismissed ? [] : matchSlashCommands(input, skillCommands);
   const slashSel = Math.min(slashIndex, Math.max(0, slashMatches.length - 1));
   function pickSlashCommand(name: string) {
     setInput(`/${name} `);
@@ -272,7 +294,7 @@ export default function ChatPane({
     // Slash commands (/check-bibtex …) expand into a full instruction: the
     // expanded prompt is the message content (history is rebuilt from content
     // every turn), the raw command is kept for the bubble.
-    const expanded = expandSlashCommand(raw);
+    const expanded = expandSlashCommand(raw, skillCommands);
     const text = expanded?.prompt ?? raw;
 
     const userMsg: UIMessage = {
@@ -587,7 +609,10 @@ export default function ChatPane({
                   onMouseEnter={() => setSlashIndex(i)}
                 >
                   <span className="slash-name">/{c.name}</span>
-                  <span className="slash-desc">{c.description}</span>
+                  <span className="slash-desc">
+                    {c.description}
+                    {c.skill ? " · skill" : ""}
+                  </span>
                 </button>
               ))}
             </div>

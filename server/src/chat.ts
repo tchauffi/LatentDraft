@@ -14,6 +14,7 @@ import path from "node:path";
 import { writeSessionFiles, listSessionFiles } from "./compile.js";
 import { projectDir as resolveProjectDir, listFilesInDir } from "./projects.js";
 import { createAgentTools, buildSystemPrompt } from "./tools.js";
+import { listSkills } from "./skills.js";
 import { ToolCallStreamFilter, type RecoveredToolCall } from "./textToolCalls.js";
 
 /** Message content parts we exchange with the model (AI SDK v5 shape). */
@@ -144,10 +145,15 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
     await writeSessionFiles(compileSessionId, body.files);
   }
 
+  // User-authored SKILL.md packs (global + this project's). Read once per
+  // request — a mid-turn install shows up on the next message.
+  const skills = await listSkills(projectDir);
+
   const agentTools = createAgentTools({
     initialDoc,
     compileSessionId,
     projectDir,
+    skills,
     emitEdit: (e) =>
       write({
         type: "edit",
@@ -189,6 +195,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       auxFileNames,
       agentTools.hasChecked() ? undefined : editorFailureLog,
       Boolean(projectDir),
+      skills,
     );
 
   // One Agent per request: the tools close over this request's working copy,

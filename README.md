@@ -66,6 +66,7 @@ The server reads these at startup (plain environment variables — there is no `
 | Variable            | Default                  | Purpose                                              |
 | ------------------- | ------------------------ | ---------------------------------------------------- |
 | `PROJECTS_ROOT`     | `~/LatentDraft`          | Directory holding the project folders                |
+| `SKILLS_ROOT`       | `~/.latentdraft/skills`  | Directory holding global [skills](#skills-bring-your-own-commands) |
 | `PORT`              | `5174`                   | API server port                                      |
 | `HOST`              | `127.0.0.1`              | Bind address. Keep localhost — `run_python` executes arbitrary code |
 | `COMPILE_TIMEOUT_MS`| `300000`                 | Kill a Tectonic compile after this many ms           |
@@ -135,6 +136,23 @@ You stay in control:
 3. If an `old_string` doesn't match uniquely, the card shows why (not found / matches multiple places) instead of applying a wrong edit.
 
 The loop is built to survive **small local models** that fumble tool calling. If the model writes its tool call as plain text instead of a native call — bare `{"name": …, "arguments": {…}}` JSON, `<tool_call>` tags, fenced ` ```json ` blocks, or `tool_name({…})` pseudo-code — the server recovers it, executes it for real, feeds the result back, and continues the loop. `<think>…</think>` reasoning from thinking models is stripped from the chat. Repeated identical edits are rejected so the model can't apply the same insertion twice. Models that can't produce tool calls in any form still fall back to emitting ` ```latex-edit ` blocks — you get diff cards, but without the agent's self-verification.
+
+### Skills (bring your own commands)
+
+The built-in commands above are baked in — **skills** are the same idea, but yours. Drop a folder containing a `SKILL.md` into `~/.latentdraft/skills/` (available in every project) or `<project>/.latentdraft/skills/` (just that project) and it becomes **both** a `/slash` command in the composer **and** a skill the agent loads on its own (via its `skill` tool) when your request matches the description. The format is the Agent Skills convention used by Claude Code — skills written for Claude Code load unchanged, since unknown frontmatter keys (`allowed-tools`, `metadata`, …) are simply ignored:
+
+```markdown
+---
+name: thank-reviewers
+description: Draft a polite point-by-point response letter to the paper's reviewers
+---
+
+Read every .tex file in the project first. Then draft the response letter as
+sections/rebuttal.tex: quote each reviewer point, answer it, and reference the
+change made in the paper. Keep the tone appreciative and concrete…
+```
+
+`description` is required — it is the autocomplete blurb *and* what the model matches your request against, so write it like a trigger ("Use when…"). `name` is optional; the folder name is used otherwise (normalized to lowercase-and-dashes). A project skill shadows a global skill of the same name, and built-in commands always win over skills. Skills are re-read at the start of every agent turn, so editing a `SKILL.md` takes effect on your next message — no restart.
 
 ## Project layout
 

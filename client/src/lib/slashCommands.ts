@@ -16,6 +16,22 @@ export interface SlashCommand {
   prompt: string;
   /** Label for trailing text appended to the prompt (default "Additional context from me"). */
   argLabel?: string;
+  /** Set on commands backed by a user-installed SKILL.md (from /api/skills). */
+  skill?: boolean;
+}
+
+/** A skill as served by GET /api/skills. */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  /** The SKILL.md instruction body. */
+  prompt: string;
+  source: "global" | "project";
+}
+
+/** Present an installed skill as a chat slash command. */
+export function skillToSlashCommand(s: SkillInfo): SlashCommand {
+  return { name: s.name, description: s.description, prompt: s.prompt, skill: true };
 }
 
 export interface SlashExpansion {
@@ -142,11 +158,20 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
 ];
 
+/** Built-ins plus `extra` (installed skills); built-ins win on a name clash. */
+function allCommands(extra: SlashCommand[]): SlashCommand[] {
+  const taken = new Set(SLASH_COMMANDS.map((c) => c.name));
+  return [...SLASH_COMMANDS, ...extra.filter((c) => !taken.has(c.name))];
+}
+
 /** Expand a known `/command`; returns null for anything else (sent as-is). */
-export function expandSlashCommand(input: string): SlashExpansion | null {
+export function expandSlashCommand(
+  input: string,
+  extra: SlashCommand[] = [],
+): SlashExpansion | null {
   const m = /^\/([a-z][a-z0-9-]*)\b\s*([\s\S]*)$/i.exec(input.trim());
   if (!m) return null;
-  const cmd = SLASH_COMMANDS.find((c) => c.name === m[1].toLowerCase());
+  const cmd = allCommands(extra).find((c) => c.name === m[1].toLowerCase());
   if (!cmd) return null;
   const rest = m[2].trim();
   return {
@@ -161,9 +186,9 @@ export function expandSlashCommand(input: string): SlashExpansion | null {
  * Commands matching a partially typed name — non-empty only while the input
  * is still just `/na…` (no whitespace yet), i.e. while completion makes sense.
  */
-export function matchSlashCommands(input: string): SlashCommand[] {
+export function matchSlashCommands(input: string, extra: SlashCommand[] = []): SlashCommand[] {
   const m = /^\/([a-z0-9-]*)$/i.exec(input);
   if (!m) return [];
   const typed = m[1].toLowerCase();
-  return SLASH_COMMANDS.filter((c) => c.name.startsWith(typed));
+  return allCommands(extra).filter((c) => c.name.startsWith(typed));
 }

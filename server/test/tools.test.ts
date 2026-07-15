@@ -530,3 +530,47 @@ test("finalizeBib stays inactive when the agent edited without ever checking", a
   });
   assert.equal(await agent.finalizeBib(), undefined);
 });
+
+test("skill tool loads a skill's body and is absent without skills", async () => {
+  const toolEvents: { name: string; summary: string; ok: boolean }[] = [];
+  const skills = [
+    { name: "thank-reviewers", description: "Draft a response", body: "BE POLITE.", source: "global" as const },
+  ];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-skill-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => toolEvents.push(e),
+    skills,
+  });
+  assert.ok(agent.tools.skill, "skill tool registered when skills exist");
+
+  const loaded = String(await exec(agent.tools.skill!, { name: "thank-reviewers" }));
+  assert.match(loaded, /skill 'thank-reviewers'/);
+  assert.match(loaded, /BE POLITE\./);
+  assert.deepEqual(toolEvents.at(-1), { name: "skill", summary: "loaded thank-reviewers", ok: true });
+
+  const unknown = String(await exec(agent.tools.skill!, { name: "nope" }));
+  assert.match(unknown, /Unknown skill 'nope'/);
+  assert.match(unknown, /thank-reviewers — Draft a response/);
+  assert.equal(toolEvents.at(-1)?.ok, false);
+
+  const bare = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-noskill-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+  });
+  assert.equal(bare.tools.skill, undefined, "no skill tool without skills");
+});
+
+test("buildSystemPrompt lists skills only when some are installed", () => {
+  const withSkills = buildSystemPrompt("DOC", [], undefined, false, [
+    { name: "thank-reviewers", description: "Draft a response" },
+  ]);
+  assert.match(withSkills, /Installed skills/);
+  assert.match(withSkills, /- thank-reviewers: Draft a response/);
+  assert.match(withSkills, /call skill\(\{name\}\) FIRST/);
+  assert.doesNotMatch(buildSystemPrompt("DOC"), /Installed skills/);
+});

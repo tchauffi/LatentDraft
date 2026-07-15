@@ -25,6 +25,7 @@ import {
   PROJECTS_ROOT,
 } from "./projects.js";
 import { TEMPLATES } from "./templates.js";
+import { listSkills } from "./skills.js";
 import { loadProjectSyncTex, forwardSearch, reverseSearch } from "./synctex.js";
 import { listProviders } from "./providers.js";
 import { streamChat, type ChatRequest } from "./chat.js";
@@ -76,6 +77,21 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/providers", wrap(async (_req, res) => {
   const providers = await listProviders();
   res.json({ providers });
+}));
+
+/** Installed skills (global + the given project's). `prompt` is the SKILL.md
+ * body, included so the composer can expand /<name> without a second fetch. */
+app.get("/api/skills", wrap(async (req, res) => {
+  const pid = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
+  const skills = await listSkills(pid ? projectDir(pid) : undefined);
+  res.json({
+    skills: skills.map((s) => ({
+      name: s.name,
+      description: s.description,
+      source: s.source,
+      prompt: s.body,
+    })),
+  });
 }));
 
 /* ---- Projects: plain directories under PROJECTS_ROOT ---- */

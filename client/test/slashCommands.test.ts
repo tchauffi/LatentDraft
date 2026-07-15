@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandSlashCommand, matchSlashCommands } from "../src/lib/slashCommands";
+import { expandSlashCommand, matchSlashCommands, skillToSlashCommand } from "../src/lib/slashCommands";
 
 test("/check-bibtex expands to the check_bibtex instruction", () => {
   const exp = expandSlashCommand("/check-bibtex");
@@ -96,4 +96,38 @@ test("matchSlashCommands closes once the command is complete or off-menu", () =>
   assert.equal(matchSlashCommands("/zzz").length, 0);
   assert.equal(matchSlashCommands("plain text").length, 0);
   assert.equal(matchSlashCommands("").length, 0);
+});
+
+test("installed skills become slash commands; built-ins win a name clash", () => {
+  const skills = [
+    skillToSlashCommand({
+      name: "thank-reviewers",
+      description: "Draft a reviewer response",
+      prompt: "BE POLITE and address every point.",
+      source: "global",
+    }),
+    skillToSlashCommand({
+      name: "review", // clashes with the built-in
+      description: "impostor",
+      prompt: "IMPOSTOR",
+      source: "project",
+    }),
+  ];
+
+  assert.ok(matchSlashCommands("/th", skills).some((c) => c.name === "thank-reviewers"));
+  assert.ok(matchSlashCommands("/th", skills).every((c) => c.skill === true));
+  // The clash surfaces once, as the built-in.
+  const reviews = matchSlashCommands("/review", skills);
+  assert.equal(reviews.length, 1);
+  assert.notEqual(reviews[0].description, "impostor");
+  assert.match(expandSlashCommand("/review", skills)!.prompt, /REVIEW AND PLANNING/);
+
+  const exp = expandSlashCommand("/thank-reviewers reviewer 2 was harsh", skills);
+  assert.ok(exp);
+  assert.equal(exp.display, "/thank-reviewers reviewer 2 was harsh");
+  assert.match(exp.prompt, /BE POLITE and address every point\./);
+  assert.match(exp.prompt, /Additional context from me: reviewer 2 was harsh/);
+
+  // Without the extra commands, the skill name is unknown as before.
+  assert.equal(expandSlashCommand("/thank-reviewers"), null);
 });
