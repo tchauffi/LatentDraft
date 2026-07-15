@@ -396,10 +396,58 @@ body {
   color: var(--text);
 }
 .filetree-dir {
-  cursor: default;
+  cursor: pointer;
 }
 .filetree-dir:hover {
-  color: var(--text-dim);
+  color: var(--text);
+}
+.filetree-chevron {
+  flex: none;
+  margin-right: -3px;
+  transform: rotate(90deg);
+  transition: transform 0.12s ease;
+}
+.filetree-chevron-collapsed {
+  transform: rotate(0deg);
+}
+.filetree-dir-actions {
+  display: none;
+  margin-left: auto;
+  align-items: center;
+  gap: 1px;
+}
+.filetree-dir:hover .filetree-dir-actions {
+  display: flex;
+}
+.filetree-dir-actions .filetree-action {
+  width: 16px;
+  height: 16px;
+  font-size: 10.5px;
+}
+.filetree-create {
+  padding: 2px 10px 4px;
+}
+.filetree-create-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.filetree-create-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  padding: 2px 5px;
+  outline: none;
+}
+.filetree-create-err {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: #d05a4a;
+  white-space: normal;
 }
 .filetree-active {
   color: var(--text);
@@ -1046,6 +1094,57 @@ body {
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
+}
+
+/* ---- Agent question with clickable answer choices (ask_user) ---- */
+.ask-block {
+  background: #fff;
+  border: 1px solid color-mix(in oklch, var(--accent) 35%, transparent);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ask-question {
+  font-size: 13px;
+  font-weight: 600;
+}
+.ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ask-option {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  color: inherit;
+  text-align: left;
+}
+.ask-option:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--accent) 40%, transparent);
+  background: color-mix(in oklch, var(--accent) 10%, #fff);
+  color: var(--accent-ink);
+}
+.ask-option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.ask-option-picked,
+.ask-option-picked:disabled {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  opacity: 1;
+}
+.ask-option-other {
+  border-style: dashed;
+  color: var(--text-dim);
 }
 
 /* ---- Inline agent suggestions (in the editor) ---- */

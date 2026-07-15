@@ -40,3 +40,28 @@ test("isImageFile matches image extensions only", () => {
   assert.equal(isImageFile("refs.bib"), false);
   assert.equal(isImageFile("notes.txt"), false);
 });
+
+test("buildFileTree shows empty directories from the dirs listing", () => {
+  const tree = buildFileTree(["main.tex"], [], ["data", "data/raw", "sections"]);
+  assert.deepEqual(tree, [
+    {
+      name: "data",
+      path: "data",
+      children: [{ name: "raw", path: "data/raw", children: [] }],
+    },
+    { name: "sections", path: "sections", children: [] },
+    { name: "main.tex", path: "main.tex" },
+  ]);
+});
+
+test("buildFileTree merges dirs with file-derived directories without duplicates", () => {
+  const tree = buildFileTree(["sections/intro.tex", "main.tex"], [], ["sections"]);
+  assert.deepEqual(tree, [
+    {
+      name: "sections",
+      path: "sections",
+      children: [{ name: "intro.tex", path: "sections/intro.tex" }],
+    },
+    { name: "main.tex", path: "main.tex" },
+  ]);
+});

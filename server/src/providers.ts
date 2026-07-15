@@ -342,7 +342,12 @@ export async function modelSupportsVision(
 ): Promise<boolean> {
   if (providerId === "anthropic") return true; // all current Claude models are multimodal
   if (providerId !== "ollama" && providerId !== "ollama-cloud") {
-    return false; // openai-compatible: unknowable — play safe
+    // openai-compatible: not discoverable from the endpoint — opt in per model.
+    const listed = (process.env.OPENAI_VISION_MODELS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return listed.includes(modelId);
   }
   const baseUrl = providerId === "ollama-cloud" ? OLLAMA_CLOUD_BASE_URL : OLLAMA_BASE_URL;
   const key = `${providerId}:${modelId}`;

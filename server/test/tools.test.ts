@@ -386,6 +386,131 @@ test("fetch_url returns page text through the injected fetch and emits its event
   assert.equal(toolEvents[1].ok, false);
 });
 
+test("ask_user emits the question with its choices and tells the model to stop", async () => {
+  const asks: { question: string; options: string[] }[] = [];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-ask-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitAsk: (a) => asks.push(a),
+  });
+
+  assert.ok(agent.tools.ask_user, "ask_user is registered");
+  assert.match(buildSystemPrompt("x"), /ask_user/);
+
+  const result = String(
+    await exec(agent.tools.ask_user, {
+      question: "Which file is the resume?",
+      options: ["main.tex", "cv.tex"],
+    }),
+  );
+  assert.match(result, /END YOUR TURN/);
+  assert.deepEqual(asks, [
+    { question: "Which file is the resume?", options: ["main.tex", "cv.tex"] },
+  ]);
+  assert.equal(agent.hasAsked(), true);
+
+  // The question is pending: document changes are hard-blocked, so the model
+  // cannot "ask" and then keep editing before the user picks an answer.
+  const blockedEdit = String(
+    await exec(agent.tools.edit_document, {
+      explanation: "sneaky edit",
+      old_string: "x",
+      new_string: "y",
+    }),
+  );
+  assert.match(blockedEdit, /NOT APPLIED: you asked the user/);
+  assert.equal(agent.getDoc(), "x", "document unchanged while a question is pending");
+  const blockedCreate = String(
+    await exec(agent.tools.create_file, { path: "a.tex", content: "hi" }),
+  );
+  assert.match(blockedCreate, /NOT APPLIED: you asked the user/);
+
+  // One question per turn.
+  const again = String(
+    await exec(agent.tools.ask_user, { question: "And this?", options: ["a", "b"] }),
+  );
+  assert.match(again, /NOT SHOWN: you already asked/);
+  assert.equal(asks.length, 1);
+});
+
+test("ask_user rejects fewer than two usable choices without blocking the turn", async () => {
+  const asks: unknown[] = [];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-ask-test-2",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitAsk: (a) => asks.push(a),
+  });
+  const bad = String(
+    await exec(agent.tools.ask_user, { question: "Hm?", options: ["only", "  "] }),
+  );
+  assert.match(bad, /NOT SHOWN/);
+  assert.equal(asks.length, 0);
+  assert.equal(agent.hasAsked(), false, "a rejected ask must not block the turn");
+});
+
+test("find_references searches through the injected fetch and respects existing bib keys", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-r`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  const doc = "\\documentclass{article}\\begin{document}x\\end{document}";
+  await writeFile(path.join(dir, "main.tex"), doc);
+  await writeFile(
+    path.join(dir, "refs.bib"),
+    "@misc{vaswani2017attention, title={Placeholder}}\n",
+  );
+
+  const fakeFetch = (async (url: unknown) => {
+    const u = String(url);
+    if (u.includes("api.crossref.org/works?")) {
+      return new Response(
+        JSON.stringify({
+          message: {
+            items: [
+              {
+                title: ["Attention Is All You Need"],
+                author: [{ given: "Ashish", family: "Vaswani" }],
+                issued: { "date-parts": [[2017]] },
+                DOI: "10.5555/3295222",
+                "container-title": ["NeurIPS"],
+                type: "proceedings-article",
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response("<feed></feed>", { status: 200 });
+  }) as typeof fetch;
+
+  const toolEvents: { name: string; summary: string; ok: boolean }[] = [];
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-refs-test",
+    projectDir: dir,
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => toolEvents.push(e),
+    fetchFn: fakeFetch,
+  });
+
+  assert.ok(agent.tools.find_references, "find_references is registered");
+  assert.match(buildSystemPrompt("x"), /find_references/);
+
+  const report = String(await exec(agent.tools.find_references, { query: "attention" }));
+  // The generated key steps around the key already taken in refs.bib.
+  assert.match(report, /@inproceedings\{vaswani2017attentionb,/);
+  assert.match(report, /doi = \{10.5555\/3295222\}/);
+  assert.equal(toolEvents.length, 1);
+  assert.equal(toolEvents[0].name, "find_references");
+  assert.equal(toolEvents[0].ok, true);
+  assert.match(toolEvents[0].summary, /1 reference candidate/);
+});
+
 test("finalizeBib stays inactive when the agent edited without ever checking", async (t) => {
   const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-g`);
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -404,4 +529,150 @@ test("finalizeBib stays inactive when the agent edited without ever checking", a
     new_string: "hi",
   });
   assert.equal(await agent.finalizeBib(), undefined);
+});
+
+test("skill tool loads a skill's body and is absent without skills", async () => {
+  const toolEvents: { name: string; summary: string; ok: boolean }[] = [];
+  const skills = [
+    { name: "thank-reviewers", description: "Draft a response", body: "BE POLITE.", source: "global" as const },
+  ];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-skill-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => toolEvents.push(e),
+    skills,
+  });
+  assert.ok(agent.tools.skill, "skill tool registered when skills exist");
+
+  const loaded = String(await exec(agent.tools.skill!, { name: "thank-reviewers" }));
+  assert.match(loaded, /skill 'thank-reviewers'/);
+  assert.match(loaded, /BE POLITE\./);
+  assert.deepEqual(toolEvents.at(-1), { name: "skill", summary: "loaded thank-reviewers", ok: true });
+
+  const unknown = String(await exec(agent.tools.skill!, { name: "nope" }));
+  assert.match(unknown, /Unknown skill 'nope'/);
+  assert.match(unknown, /thank-reviewers — Draft a response/);
+  assert.equal(toolEvents.at(-1)?.ok, false);
+
+  const bare = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-noskill-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+  });
+  assert.equal(bare.tools.skill, undefined, "no skill tool without skills");
+});
+
+test("buildSystemPrompt lists skills only when some are installed", () => {
+  const withSkills = buildSystemPrompt("DOC", [], undefined, false, [
+    { name: "thank-reviewers", description: "Draft a response" },
+  ]);
+  assert.match(withSkills, /Installed skills/);
+  assert.match(withSkills, /- thank-reviewers: Draft a response/);
+  assert.match(withSkills, /call skill\(\{name\}\) FIRST/);
+  assert.doesNotMatch(buildSystemPrompt("DOC"), /Installed skills/);
+});
+
+test("view_pdf attaches pages for vision models and says so", async () => {
+  const doc = "\\documentclass{article}\\begin{document}vision test\\end{document}";
+  const events: { name: string; summary: string; ok: boolean }[] = [];
+  const withVision = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-vision-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => events.push(e),
+    vision: true,
+  });
+  const seen = String(await exec(withVision.tools.view_pdf, {}));
+  assert.match(seen, /attached in the next message/);
+  assert.match(events.at(-1)!.summary, /pages attached/);
+  const pages = withVision.takeRenderedImages();
+  assert.ok(pages.length > 0, "rendered pages are available for the feedback message");
+  assert.equal(withVision.takeRenderedImages().length, 0, "takeRenderedImages clears on read");
+
+  const textOnly = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-novision-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+  });
+  const plain = String(await exec(textOnly.tools.view_pdf, {}));
+  assert.doesNotMatch(plain, /attached in the next message/);
+});
+
+test("vision recheck: edits after looking trigger a re-render, which resets it", async () => {
+  const doc = "\\documentclass{article}\\begin{document}recheck test\\end{document}";
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-recheck-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    vision: true,
+  });
+  assert.equal(agent.needsVisionRecheck(), false, "nothing viewed yet");
+
+  await exec(agent.tools.view_pdf, {});
+  agent.takeRenderedImages();
+  assert.equal(agent.needsVisionRecheck(), false, "viewed but nothing edited since");
+
+  await exec(agent.tools.edit_document, {
+    explanation: "x",
+    old_string: "recheck test",
+    new_string: "recheck TEST",
+  });
+  assert.equal(agent.needsVisionRecheck(), true, "edited after looking");
+
+  const r = await agent.renderForVisionRecheck();
+  assert.ok(r, "recheck renders the updated document");
+  assert.ok(r!.images.length > 0, "recheck returns page images");
+  assert.equal(typeof r!.report, "string");
+  assert.equal(agent.needsVisionRecheck(), false, "the new look resets the recheck");
+});
+
+test("vision recheck never triggers for text-only models", async () => {
+  const doc = "\\documentclass{article}\\begin{document}plain\\end{document}";
+  const agent = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-recheck-novision",
+    emitEdit: () => {},
+    emitCheck: () => {},
+  });
+  await exec(agent.tools.view_pdf, {});
+  await exec(agent.tools.edit_document, {
+    explanation: "x",
+    old_string: "plain",
+    new_string: "PLAIN",
+  });
+  assert.equal(agent.needsVisionRecheck(), false);
+});
+
+test("run_python figures are attached for vision models", async (t) => {
+  const dir = path.join(os.tmpdir(), `lat-tools-${Date.now().toString(36)}-vfig`);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, "main.tex"), "\\documentclass{article}\\begin{document}x\\end{document}");
+  const events: { name: string; summary: string; ok: boolean }[] = [];
+  const agent = createAgentTools({
+    initialDoc: "x",
+    compileSessionId: "tools-vfig-test",
+    projectDir: dir,
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => events.push(e),
+    vision: true,
+  });
+  const out = String(
+    await exec(agent.tools.run_python, {
+      code:
+        "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n" +
+        "plt.plot([1,2,3],[1,4,9])\nplt.savefig('curve.png', dpi=100)\n",
+    }),
+  );
+  assert.match(out, /attached as images in the next message/);
+  assert.match(events.at(-1)!.summary, /figure attached/);
+  const imgs = agent.takeRenderedImages();
+  assert.ok(imgs.length > 0, "the generated PNG is pending for the vision message");
 });

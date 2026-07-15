@@ -3,6 +3,11 @@ import CodeMirror from "@uiw/react-codemirror";
 import { EditorView } from "@codemirror/view";
 import { StreamLanguage } from "@codemirror/language";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
+import { python } from "@codemirror/legacy-modes/mode/python";
+import { yaml } from "@codemirror/legacy-modes/mode/yaml";
+import { shell } from "@codemirror/legacy-modes/mode/shell";
+import { json as jsonMode } from "@codemirror/legacy-modes/mode/javascript";
+import { markdown } from "@codemirror/lang-markdown";
 import { linter, lintGutter } from "@codemirror/lint";
 import { latexLight } from "../lib/editorTheme";
 import type { Extension } from "@codemirror/state";
@@ -13,6 +18,26 @@ import type { CompileDiagnostic, ProposedEdit } from "../lib/api";
 
 const latex = StreamLanguage.define(stex);
 
+/** Non-LaTeX syntax highlighting by extension; undefined renders plain. */
+function languageFor(file: string): Extension | undefined {
+  const ext = /\.([a-z0-9]+)$/i.exec(file)?.[1]?.toLowerCase();
+  switch (ext) {
+    case "py":
+      return StreamLanguage.define(python);
+    case "md":
+      return markdown();
+    case "yml":
+    case "yaml":
+      return StreamLanguage.define(yaml);
+    case "json":
+      return StreamLanguage.define(jsonMode);
+    case "sh":
+      return StreamLanguage.define(shell);
+    default:
+      return undefined;
+  }
+}
+
 interface Props {
   value: string;
   onChange: (value: string) => void;
@@ -21,6 +46,8 @@ interface Props {
   files: string[];
   /** All editable project files, shown in the tree (superset of `files`). */
   projectFiles?: string[];
+  /** All project directories (incl. empty ones), from the server listing. */
+  projectDirs?: string[];
   active: string;
   onSelect: (file: string) => void;
   /** Close an open tab (never called for main.tex — it is pinned). */
@@ -31,10 +58,14 @@ interface Props {
   fileUrl?: (name: string) => string;
   /** Upload a data file into the project; resolves to an error message or null. */
   onUpload?: (file: File) => Promise<string | null>;
+  /** Create a file or folder (inline input row); resolves to an error or null. */
+  onCreateEntry?: (path: string, kind: "file" | "dir") => Promise<string | null>;
   /** Project file operations (shown as actions above the tree). */
-  onNewFile?: () => void;
   onRenameFile?: (path: string) => void;
   onDeleteFile?: (path: string) => void;
+  /** Folder operations (hover actions on directory rows). */
+  onRenameDir?: (path: string) => void;
+  onDeleteDir?: (path: string) => void;
   /** Pending agent edits to render inline (Cursor-style accept/reject). */
   suggestions?: ProposedEdit[];
   onAcceptSuggestion?: (edit: ProposedEdit) => void;
@@ -68,35 +99,95 @@ function FolderIcon() {
   );
 }
 
+function Chevron({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      width="8"
+      height="8"
+      viewBox="0 0 8 8"
+      fill="none"
+      stroke="#b0a99f"
+      strokeWidth="1.4"
+      className={`filetree-chevron${collapsed ? " filetree-chevron-collapsed" : ""}`}
+    >
+      <path d="M2 1l4 3-4 3" />
+    </svg>
+  );
+}
+
 function TreeLevel({
   nodes,
   active,
   preview,
   onPick,
   errorCounts,
+  collapsed,
+  onToggleDir,
+  onRenameDir,
+  onDeleteDir,
 }: {
   nodes: FileNode[];
   active: string;
   preview: string | null;
   onPick: (node: FileNode) => void;
   errorCounts?: Record<string, number>;
+  collapsed: Set<string>;
+  onToggleDir: (path: string) => void;
+  onRenameDir?: (path: string) => void;
+  onDeleteDir?: (path: string) => void;
 }) {
   return (
     <ul className="filetree-level">
       {nodes.map((node) =>
         node.children ? (
           <li key={node.path}>
-            <div className="filetree-row filetree-dir">
+            <div
+              className="filetree-row filetree-dir"
+              onClick={() => onToggleDir(node.path)}
+            >
+              <Chevron collapsed={collapsed.has(node.path)} />
               <FolderIcon />
-              {node.name}
+              <span className="filetree-name">{node.name}</span>
+              <span className="filetree-dir-actions">
+                {onRenameDir && (
+                  <button
+                    className="filetree-action"
+                    title={`Rename ${node.path}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRenameDir(node.path);
+                    }}
+                  >
+                    ✎
+                  </button>
+                )}
+                {onDeleteDir && (
+                  <button
+                    className="filetree-action"
+                    title={`Delete ${node.path}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteDir(node.path);
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
             </div>
-            <TreeLevel
-              nodes={node.children}
-              active={active}
-              preview={preview}
-              onPick={onPick}
-              errorCounts={errorCounts}
-            />
+            {!collapsed.has(node.path) && (
+              <TreeLevel
+                nodes={node.children}
+                active={active}
+                preview={preview}
+                onPick={onPick}
+                errorCounts={errorCounts}
+                collapsed={collapsed}
+                onToggleDir={onToggleDir}
+                onRenameDir={onRenameDir}
+                onDeleteDir={onDeleteDir}
+              />
+            )}
           </li>
         ) : (
           <li key={node.path}>
@@ -128,15 +219,18 @@ export default function EditorPane({
   onCursor,
   files,
   projectFiles,
+  projectDirs,
   active,
   onSelect,
   onCloseTab,
   generatedFiles,
   fileUrl,
   onUpload,
-  onNewFile,
+  onCreateEntry,
   onRenameFile,
   onDeleteFile,
+  onRenameDir,
+  onDeleteDir,
   suggestions,
   onAcceptSuggestion,
   onRejectSuggestion,
@@ -193,9 +287,47 @@ export default function EditorPane({
   const [preview, setPreview] = useState<{ path: string; stamp: number } | null>(null);
 
   const tree = useMemo(
-    () => buildFileTree(projectFiles ?? files, generatedFiles ?? []),
-    [projectFiles, files, generatedFiles],
+    () => buildFileTree(projectFiles ?? files, generatedFiles ?? [], projectDirs ?? []),
+    [projectFiles, files, generatedFiles, projectDirs],
   );
+  // Folded folders (VS Code style) — session-local, keyed by dir path.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggleDir = (path: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  // Inline creation row: which kind is being named, plus a server-side error.
+  const [creating, setCreating] = useState<"file" | "dir" | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const createInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (creating) createInputRef.current?.focus();
+  }, [creating]);
+  const createBusyRef = useRef(false); // Enter then blur must not create twice
+  const submitCreate = async (name: string) => {
+    if (createBusyRef.current) return;
+    const path = name.trim().replace(/^\/+|\/+$/g, "");
+    if (!path || !onCreateEntry) {
+      setCreating(null);
+      setCreateError(null);
+      return;
+    }
+    createBusyRef.current = true;
+    try {
+      const err = await onCreateEntry(path, creating ?? "file");
+      if (err) {
+        setCreateError(err); // keep the row open so the name can be fixed
+      } else {
+        setCreating(null);
+        setCreateError(null);
+      }
+    } finally {
+      createBusyRef.current = false;
+    }
+  };
   // A previewed file can disappear (e.g. new browser session dir) — fall back.
   const previewGone = preview && !(generatedFiles ?? []).includes(preview.path);
   const activePreview = preview && !previewGone ? preview : null;
@@ -235,12 +367,14 @@ export default function EditorPane({
     return counts;
   }, [diagnostics]);
 
-  // .tex files get LaTeX highlighting; other buffers (e.g. .bib) render plain.
+  // .tex files get LaTeX highlighting (plus autocomplete and SyncTeX); other
+  // known types (.py, .md, .yml, .json, .sh) get plain syntax highlighting.
   // The inline-suggestion extension is rebuilt whenever the pending set changes.
   const extensions = useMemo(() => {
+    const lang = languageFor(active);
     const exts: Extension[] = active.endsWith(".tex")
       ? [latex, autocompleteExt, ...lintExt, ...syncClickExt]
-      : [...lintExt];
+      : [...(lang ? [lang] : []), ...lintExt];
     if (suggestions && suggestions.length > 0 && onAcceptSuggestion && onRejectSuggestion) {
       const cb: SuggestionCallbacks = {
         onAccept: onAcceptSuggestion,
@@ -304,12 +438,32 @@ export default function EditorPane({
       <div className="editor-main">
         {showTree && (
           <div className="filetree">
-            {onNewFile && (
+            {onCreateEntry && (
               <div className="filetree-actions">
                 <span className="filetree-actions-label">FILES</span>
                 <div className="toolbar-spacer" />
-                <button className="filetree-action" title="New file" onClick={onNewFile}>
+                <button
+                  className="filetree-action"
+                  title="New file (any text type: .tex, .py, .md, …; use / to nest)"
+                  onClick={() => {
+                    setCreating("file");
+                    setCreateError(null);
+                  }}
+                >
                   ＋
+                </button>
+                <button
+                  className="filetree-action"
+                  title="New folder (use / to nest)"
+                  onClick={() => {
+                    setCreating("dir");
+                    setCreateError(null);
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                    <path d="M1.5 3h4l1.5 2h5.5v6.5h-11z" />
+                    <path d="M7 7.5v3M5.5 9h3" />
+                  </svg>
                 </button>
                 <button
                   className="filetree-action"
@@ -329,12 +483,41 @@ export default function EditorPane({
                 </button>
               </div>
             )}
+            {creating && (
+              <div className="filetree-create">
+                <div className="filetree-create-row">
+                  {creating === "dir" ? <FolderIcon /> : <FileIcon />}
+                  <input
+                    ref={createInputRef}
+                    className="filetree-create-input"
+                    placeholder={creating === "dir" ? "folder/name" : "sections/notes.md"}
+                    spellCheck={false}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void submitCreate(e.currentTarget.value);
+                      if (e.key === "Escape") {
+                        setCreating(null);
+                        setCreateError(null);
+                      }
+                    }}
+                    onBlur={(e) => {
+                      // Blur with a name = create (like VS Code); empty = cancel.
+                      void submitCreate(e.currentTarget.value);
+                    }}
+                  />
+                </div>
+                {createError && <div className="filetree-create-err">{createError}</div>}
+              </div>
+            )}
             <TreeLevel
               nodes={tree}
               active={active}
               preview={activePreview?.path ?? null}
               onPick={pick}
               errorCounts={errorCounts}
+              collapsed={collapsed}
+              onToggleDir={toggleDir}
+              onRenameDir={onRenameDir}
+              onDeleteDir={onDeleteDir}
             />
             {onUpload && (
               <div className="filetree-upload">
@@ -348,7 +531,7 @@ export default function EditorPane({
                 <input
                   ref={uploadInputRef}
                   type="file"
-                  accept=".csv,.tsv,.xlsx,.xls,.json,.txt,.dat,.png,.jpg,.jpeg,.svg,.pdf,.bib"
+                  accept=".csv,.tsv,.xlsx,.xls,.json,.txt,.dat,.png,.jpg,.jpeg,.svg,.pdf,.bib,.py,.md,.yml,.yaml"
                   style={{ display: "none" }}
                   onChange={async (e) => {
                     const f = e.target.files?.[0];

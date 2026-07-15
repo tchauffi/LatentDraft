@@ -24,6 +24,9 @@ const {
   slugifyProjectName,
   extractTexTitle,
   readProjectChat,
+  listDirsInDir,
+  createProjectDir,
+  deleteProjectDir,
   writeProjectChat,
   projectDir,
 } = await import("../src/projects.js");
@@ -243,4 +246,56 @@ test("compileProject without a main.tex fails with guidance, not a crash", async
   const result = await compileProject(dir);
   assert.equal(result.ok, false);
   assert.match(result.log, /no main\.tex/i);
+});
+
+test("createProjectDir makes empty folders that listDirsInDir reports", async () => {
+  await createProject("dirs");
+  const r = await createProjectDir("dirs", "data/raw");
+  assert.deepEqual(r, { ok: true });
+  // Idempotent — creating it again is fine.
+  assert.deepEqual(await createProjectDir("dirs", "data/raw"), { ok: true });
+  const dirs = await listDirsInDir(projectDir("dirs")!);
+  assert.ok(dirs?.includes("data"));
+  assert.ok(dirs?.includes("data/raw"));
+  // The empty folder holds no files, so the FILE listing can't know about it.
+  const files = await listProjectFiles("dirs");
+  assert.ok(files!.every((f) => !f.path.startsWith("data/")));
+});
+
+test("createProjectDir refuses hidden and escaping paths", async () => {
+  await createProject("dirsafe");
+  assert.equal((await createProjectDir("dirsafe", ".latentdraft/x")).ok, false);
+  assert.equal((await createProjectDir("dirsafe", "../evil")).ok, false);
+  assert.equal((await createProjectDir("dirsafe", ".git/hooks")).ok, false);
+});
+
+test("listDirsInDir hides .latentdraft and .git subtrees", async () => {
+  await createProject("dirhidden");
+  const dir = projectDir("dirhidden")!;
+  await mkdir(path.join(dir, ".latentdraft", "agent"), { recursive: true });
+  await mkdir(path.join(dir, ".git", "hooks"), { recursive: true });
+  const dirs = await listDirsInDir(dir);
+  assert.ok(dirs!.every((d) => !d.startsWith(".latentdraft") && !d.startsWith(".git")));
+});
+
+test("deleteProjectDir removes a folder and its contents", async () => {
+  await createProject("dirdel");
+  await createProjectDir("dirdel", "notes");
+  await writeProjectFile("dirdel", "notes/a.md", Buffer.from("# a"));
+  assert.deepEqual(await deleteProjectDir("dirdel", "notes"), { ok: true });
+  await assert.rejects(access(path.join(projectDir("dirdel")!, "notes")));
+  // Deleting a FILE through the dir API is refused.
+  assert.equal((await deleteProjectDir("dirdel", "main.tex")).ok, false);
+  assert.equal((await deleteProjectDir("dirdel", "gone")).ok, false);
+});
+
+test("renameProjectFile moves a whole directory", async () => {
+  await createProject("dirmove");
+  await writeProjectFile("dirmove", "data/prep.py", Buffer.from("print(1)"));
+  const r = await renameProjectFile("dirmove", "data", "datasets");
+  assert.deepEqual(r, { ok: true });
+  assert.equal(
+    (await readFile(path.join(projectDir("dirmove")!, "datasets", "prep.py"), "utf8")),
+    "print(1)",
+  );
 });

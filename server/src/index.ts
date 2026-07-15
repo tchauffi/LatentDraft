@@ -15,6 +15,9 @@ import {
   duplicateProject,
   deleteProject,
   listProjectFiles,
+  listDirsInDir,
+  createProjectDir,
+  deleteProjectDir,
   readProjectFile,
   writeProjectFile,
   renameProjectFile,
@@ -25,6 +28,7 @@ import {
   PROJECTS_ROOT,
 } from "./projects.js";
 import { TEMPLATES } from "./templates.js";
+import { listSkills } from "./skills.js";
 import { loadProjectSyncTex, forwardSearch, reverseSearch } from "./synctex.js";
 import { listProviders } from "./providers.js";
 import { streamChat, type ChatRequest } from "./chat.js";
@@ -78,6 +82,21 @@ app.get("/api/providers", wrap(async (_req, res) => {
   res.json({ providers });
 }));
 
+/** Installed skills (global + the given project's). `prompt` is the SKILL.md
+ * body, included so the composer can expand /<name> without a second fetch. */
+app.get("/api/skills", wrap(async (req, res) => {
+  const pid = typeof req.query.projectId === "string" ? req.query.projectId : undefined;
+  const skills = await listSkills(pid ? projectDir(pid) : undefined);
+  res.json({
+    skills: skills.map((s) => ({
+      name: s.name,
+      description: s.description,
+      source: s.source,
+      prompt: s.body,
+    })),
+  });
+}));
+
 /* ---- Projects: plain directories under PROJECTS_ROOT ---- */
 
 /** Where projects live on disk, with the home dir shortened for display. */
@@ -128,8 +147,34 @@ app.delete("/api/projects/:id", wrap(async (req, res) => {
 
 app.get("/api/projects/:id/files", wrap(async (req, res) => {
   const files = await listProjectFiles(req.params.id);
-  if (!files) res.status(404).json({ error: "Project not found." });
-  else res.json({ files });
+  if (!files) {
+    res.status(404).json({ error: "Project not found." });
+    return;
+  }
+  // Directories too, so the client's tree can show EMPTY folders.
+  const dir = projectDir(req.params.id);
+  const dirs = (dir && (await listDirsInDir(dir))) || [];
+  res.json({ files, dirs });
+}));
+
+/** Create a directory (empty folders are real, like VS Code). Body: { path }. */
+app.post("/api/projects/:id/dir", wrap(async (req, res) => {
+  const { path: rel } = req.body ?? {};
+  if (typeof rel !== "string" || !rel.trim()) {
+    res.status(400).json({ error: "Expected { path }." });
+    return;
+  }
+  const result = await createProjectDir(req.params.id, rel.trim());
+  if (result.ok) res.json({ ok: true });
+  else res.status(400).json({ error: result.error });
+}));
+
+/** Delete a directory and everything in it. */
+app.delete("/api/projects/:id/dir", wrap(async (req, res) => {
+  const rel = typeof req.query.path === "string" ? req.query.path : "";
+  const result = await deleteProjectDir(req.params.id, rel);
+  if (result.ok) res.json({ ok: true });
+  else res.status(400).json({ error: result.error });
 }));
 
 app.get("/api/projects/:id/file", wrap(async (req, res) => {

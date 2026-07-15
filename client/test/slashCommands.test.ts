@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandSlashCommand, matchSlashCommands } from "../src/lib/slashCommands";
+import { expandSlashCommand, matchSlashCommands, skillToSlashCommand } from "../src/lib/slashCommands";
 
 test("/check-bibtex expands to the check_bibtex instruction", () => {
   const exp = expandSlashCommand("/check-bibtex");
@@ -38,6 +38,36 @@ test("/apply labels its trailing text as the job posting", () => {
   assert.doesNotMatch(exp.prompt, /Additional context from me/);
 });
 
+test("/find-refs expands to the find_references workflow", () => {
+  const exp = expandSlashCommand("/find-refs attention mechanisms in transformers");
+  assert.ok(exp);
+  assert.match(exp.prompt, /find_references/);
+  assert.match(exp.prompt, /NEVER write a \.bib/);
+  assert.match(exp.prompt, /EXACTLY as the\s+tool returned it/);
+  assert.match(
+    exp.prompt,
+    /What to find a source for \(topic, claim, or title fragment\): attention mechanisms in transformers/,
+  );
+});
+
+test("/review expands to a plan-first proofread", () => {
+  const exp = expandSlashCommand("/review");
+  assert.ok(exp);
+  assert.match(exp.prompt, /REVIEW AND PLANNING\s+ONLY/);
+  assert.match(exp.prompt, /do NOT call edit_document/);
+  assert.match(exp.prompt, /NUMBERED list of concrete\s+findings/);
+  assert.match(exp.prompt, /Never change technical meaning/);
+});
+
+test("/check-submission expands to a plan-first compliance check", () => {
+  const exp = expandSlashCommand("/check-submission NeurIPS 2026, 9 pages excl. refs");
+  assert.ok(exp);
+  assert.match(exp.prompt, /CHECKING AND PLANNING\s+ONLY/);
+  assert.match(exp.prompt, /view_pdf/);
+  assert.match(exp.prompt, /anonymization/);
+  assert.match(exp.prompt, /Venue and its rules[^:]*: NeurIPS 2026, 9 pages excl\. refs/);
+});
+
 test("unknown commands and plain text pass through as null", () => {
   assert.equal(expandSlashCommand("/unknown-cmd"), null);
   assert.equal(expandSlashCommand("fix the intro"), null);
@@ -47,11 +77,18 @@ test("unknown commands and plain text pass through as null", () => {
 test("matchSlashCommands offers commands while the name is being typed", () => {
   assert.ok(matchSlashCommands("/").some((c) => c.name === "check-bibtex"));
   assert.ok(matchSlashCommands("/").some((c) => c.name === "apply"));
+  assert.ok(matchSlashCommands("/").some((c) => c.name === "find-refs"));
+  assert.ok(matchSlashCommands("/").some((c) => c.name === "review"));
+  assert.ok(matchSlashCommands("/").some((c) => c.name === "check-submission"));
   assert.equal(matchSlashCommands("/ap").length, 1);
   assert.equal(matchSlashCommands("/ap")[0].name, "apply");
-  assert.equal(matchSlashCommands("/che").length, 1);
-  assert.equal(matchSlashCommands("/CHE").length, 1);
+  // "check-" is a shared prefix of check-bibtex and check-submission.
+  assert.equal(matchSlashCommands("/che").length, 2);
+  assert.equal(matchSlashCommands("/CHE").length, 2);
+  assert.equal(matchSlashCommands("/check-b").length, 1);
   assert.equal(matchSlashCommands("/check-bibtex").length, 1);
+  assert.equal(matchSlashCommands("/rev")[0].name, "review");
+  assert.equal(matchSlashCommands("/fi")[0].name, "find-refs");
 });
 
 test("matchSlashCommands closes once the command is complete or off-menu", () => {
@@ -59,4 +96,38 @@ test("matchSlashCommands closes once the command is complete or off-menu", () =>
   assert.equal(matchSlashCommands("/zzz").length, 0);
   assert.equal(matchSlashCommands("plain text").length, 0);
   assert.equal(matchSlashCommands("").length, 0);
+});
+
+test("installed skills become slash commands; built-ins win a name clash", () => {
+  const skills = [
+    skillToSlashCommand({
+      name: "thank-reviewers",
+      description: "Draft a reviewer response",
+      prompt: "BE POLITE and address every point.",
+      source: "global",
+    }),
+    skillToSlashCommand({
+      name: "review", // clashes with the built-in
+      description: "impostor",
+      prompt: "IMPOSTOR",
+      source: "project",
+    }),
+  ];
+
+  assert.ok(matchSlashCommands("/th", skills).some((c) => c.name === "thank-reviewers"));
+  assert.ok(matchSlashCommands("/th", skills).every((c) => c.skill === true));
+  // The clash surfaces once, as the built-in.
+  const reviews = matchSlashCommands("/review", skills);
+  assert.equal(reviews.length, 1);
+  assert.notEqual(reviews[0].description, "impostor");
+  assert.match(expandSlashCommand("/review", skills)!.prompt, /REVIEW AND PLANNING/);
+
+  const exp = expandSlashCommand("/thank-reviewers reviewer 2 was harsh", skills);
+  assert.ok(exp);
+  assert.equal(exp.display, "/thank-reviewers reviewer 2 was harsh");
+  assert.match(exp.prompt, /BE POLITE and address every point\./);
+  assert.match(exp.prompt, /Additional context from me: reviewer 2 was harsh/);
+
+  // Without the extra commands, the skill name is unknown as before.
+  assert.equal(expandSlashCommand("/thank-reviewers"), null);
 });

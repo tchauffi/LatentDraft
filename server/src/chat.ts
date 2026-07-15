@@ -14,6 +14,7 @@ import path from "node:path";
 import { writeSessionFiles, listSessionFiles } from "./compile.js";
 import { projectDir as resolveProjectDir, listFilesInDir } from "./projects.js";
 import { createAgentTools, buildSystemPrompt } from "./tools.js";
+import { listSkills } from "./skills.js";
 import { ToolCallStreamFilter, type RecoveredToolCall } from "./textToolCalls.js";
 
 /** Message content parts we exchange with the model (AI SDK v5 shape). */
@@ -71,6 +72,22 @@ const EMPTY_ROUND_NUDGE =
   "create_file / compile_check). When the task is done and the document compiles, reply " +
   "with a short plain-text summary.";
 const MAX_EMPTY_ROUND_NUDGES = 2;
+// Sent WITH the pending images (view_pdf pages, generated figures) after a
+// native round, so a vision model can actually look at what it produced
+// instead of trusting the text reports alone.
+const VISION_RESULTS_NOTE =
+  "Here are the images from your tool calls (rendered PDF pages and/or figures you " +
+  "generated) — inspect them. Check the layout, figures, labels, and typography: nothing " +
+  "clipped, overlapping, or unreadable. If something is off, fix it and render/view again " +
+  "to confirm; if it all looks right, continue (or wrap up).";
+// Sent with the END-OF-TURN re-render when the model edited after looking but
+// never looked again — its own fix must be verified visually, not on faith.
+const VISION_RECHECK_NOTE =
+  "I re-compiled and re-rendered the document AFTER your latest edits — the updated pages " +
+  "are attached. LOOK at them and verify your change actually looks right. If it does, " +
+  "reply with a short summary; if not, fix it with edit_document and check again with " +
+  "view_pdf.";
+const MAX_VISION_RECHECK_ROUNDS = 2;
 const RECOVERY_CONTINUE_NOTE =
   "(The current document is in the system prompt.) Continue the task — do not repeat " +
   "or summarize these results. Prefer native tool calls; if you must write one as text, " +
@@ -91,6 +108,7 @@ interface InvokableTool {
  *   { type: "edit",  id, explanation, old_string, new_string } proposed edit (validated to match)
  *   { type: "check", ok, log }                                 result of a compile_check
  *   { type: "tool",  name, summary, ok }                       non-edit tool activity
+ *   { type: "ask",   question, options }                       clickable answer choices
  *   { type: "error", message }
  *   { type: "done" }
  */
@@ -143,10 +161,16 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
     await writeSessionFiles(compileSessionId, body.files);
   }
 
+  // User-authored SKILL.md packs (global + this project's). Read once per
+  // request — a mid-turn install shows up on the next message.
+  const skills = await listSkills(projectDir);
+
   const agentTools = createAgentTools({
     initialDoc,
     compileSessionId,
     projectDir,
+    skills,
+    vision: visionOk,
     emitEdit: (e) =>
       write({
         type: "edit",
@@ -158,6 +182,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       }),
     emitCheck: (c) => write({ type: "check", ok: c.ok, log: c.log }),
     emitTool: (t) => write({ type: "tool", name: t.name, summary: t.summary, ok: t.ok }),
+    emitAsk: (a) => write({ type: "ask", question: a.question, options: a.options }),
   });
 
   const knownToolNames: ReadonlySet<string> = new Set(Object.keys(agentTools.tools));
@@ -187,6 +212,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       auxFileNames,
       agentTools.hasChecked() ? undefined : editorFailureLog,
       Boolean(projectDir),
+      skills,
     );
 
   // One Agent per request: the tools close over this request's working copy,
@@ -221,7 +247,13 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       const filter = new ToolCallStreamFilter(
         knownToolNames,
         (text) => write({ type: "text", text }),
-        [RECOVERY_CONTINUE_NOTE, RECOVERY_RESULTS_HEADER, EMPTY_ROUND_NUDGE],
+        [
+          RECOVERY_CONTINUE_NOTE,
+          RECOVERY_RESULTS_HEADER,
+          EMPTY_ROUND_NUDGE,
+          VISION_RESULTS_NOTE,
+          VISION_RECHECK_NOTE,
+        ],
       );
       const stream = await agent.stream(messages as Parameters<typeof agent.stream>[0], {
         instructions: system,
@@ -298,7 +330,32 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
     for (let round = 0; round <= MAX_RECOVERY_ROUNDS; round++) {
       if (abort.signal.aborted) return;
       const { text, calls } = await runRound(convo, currentSystemPrompt());
+      // ask_user ran (natively): the question is on screen and further edits
+      // are blocked — end the turn so the user can actually answer.
+      if (calls.length === 0 && agentTools.hasAsked()) return;
       if (calls.length === 0) {
+        // Native tools left pending images (view_pdf pages, run_python /
+        // render_mermaid figures): a vision model gets them as image parts in
+        // a follow-up user message (Ollama accepts images ONLY there, never
+        // in tool results) and one more round to actually look.
+        // takeRenderedImages() clears on read, so this can't repeat itself.
+        if (visionOk && round < MAX_RECOVERY_ROUNDS) {
+          const pages = agentTools.takeRenderedImages();
+          if (pages.length > 0) {
+            convo = [
+              ...convo,
+              ...(text.trim() ? [{ role: "assistant" as const, content: text.trim() }] : []),
+              {
+                role: "user",
+                content: [
+                  { type: "text" as const, text: VISION_RESULTS_NOTE },
+                  ...pages.map((data) => ({ type: "image" as const, image: data })),
+                ],
+              },
+            ];
+            continue;
+          }
+        }
         // Silent stall: nothing visible and nothing recovered. Nudge the model
         // to act on its (hidden) plan instead of ending the turn on nothing.
         if (
@@ -322,6 +379,9 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
         resultBlocks.push(`Result of ${call.name}:\n${r.text}`);
         images.push(...r.images);
       }
+      // ask_user recovered from text: don't feed results back for another
+      // round — the turn is over until the user picks an answer.
+      if (agentTools.hasAsked()) return;
 
       // Keep only the model's own prose in the assistant slot — a template-y
       // summary of the calls gets parroted verbatim by small models. The call
@@ -343,16 +403,17 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
     }
   }
 
-  try {
-    await runAgentTurn(body.messages);
-
-    // Enforce verification the model may have skipped, and fix a broken result
-    // rather than leaving the loop on a document that does not compile.
+  // Enforce verification the model may have skipped, and fix a broken result
+  // rather than leaving the loop on a document that does not compile.
+  async function ensureCompiles(): Promise<void> {
     for (let round = 0; round <= MAX_CORRECTIVE_ROUNDS; round++) {
       if (abort.signal.aborted) break;
       const check = await agentTools.finalize();
       if (!check || check.ok) break; // nothing changed, or it compiles
       if (round === MAX_CORRECTIVE_ROUNDS) break; // out of attempts; banner shows the failure
+      // A question is pending: edits are blocked, so a fix round can't fix
+      // anything — leave the banner and let the user answer first.
+      if (agentTools.hasAsked()) break;
       write({ type: "text", text: "\n\n_Document still fails to compile — retrying a fix…_\n\n" });
       await runAgentTurn([
         {
@@ -363,6 +424,39 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
             `Use read_document first if you need to see the current state of the document.`,
         },
       ]);
+    }
+  }
+
+  try {
+    await runAgentTurn(body.messages);
+    await ensureCompiles();
+
+    // Iterative visual improvement: the model edited AFTER seeing the pages
+    // but never looked again — re-render and show it the result of its own
+    // fix, looping until it stops editing (or the cap). Mirrors the compile
+    // and bibliography enforcement below.
+    for (let round = 0; round < MAX_VISION_RECHECK_ROUNDS; round++) {
+      if (abort.signal.aborted || !visionOk) break;
+      if (agentTools.hasAsked()) break; // pending question — no extra rounds
+      if (!agentTools.needsVisionRecheck()) break;
+      const r = await agentTools.renderForVisionRecheck();
+      if (!r) break; // doesn't compile / nothing rendered — ensureCompiles reported it
+      write({ type: "text", text: "\n\n_Re-inspecting the rendered pages after the edits…_\n\n" });
+      await runAgentTurn([
+        {
+          role: "user",
+          content: [
+            {
+              type: "text" as const,
+              text: `${VISION_RECHECK_NOTE}\n\nUpdated layout report:\n${r.report}`,
+            },
+            ...r.images.map((data) => ({ type: "image" as const, image: data })),
+          ],
+        },
+      ]);
+      // A recheck round may edit again — keep the compile guarantee before
+      // deciding whether another look is needed.
+      await ensureCompiles();
     }
 
     // Same enforcement for the bibliography: if check_bibtex was part of this
@@ -377,6 +471,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       if (bib.report === prevBibReport) break;
       prevBibReport = bib.report;
       if (round === MAX_BIB_RECHECK_ROUNDS) break;
+      if (agentTools.hasAsked()) break; // pending question — no fix rounds
       write({ type: "text", text: "\n\n_Rechecking references after the edits…_\n\n" });
       await runAgentTurn([
         {

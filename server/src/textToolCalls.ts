@@ -26,10 +26,21 @@ export function normalizeToolName(raw: string, known: ReadonlySet<string>): stri
   if (known.has(name)) return name;
   const has = (n: string) => (known.has(n) ? n : undefined);
   if (/ats/.test(name)) return has("ats_check");
+  // "find/search references" is discovery; "check/verify references" stays with check_bibtex.
+  if (
+    /find|search|lookup|discover/.test(name) &&
+    /ref|paper|doi|arxiv|crossref|scholar|cit/.test(name) &&
+    !/check|verify|validate/.test(name)
+  ) {
+    return has("find_references");
+  }
   if (/pdf|preview|render|screenshot|look/.test(name)) return has("view_pdf");
   if (/read|show|cat|inspect/.test(name)) return has("read_document");
   if (/edit|write|replace|update|modify|insert|patch|apply|create|compose/.test(name)) return has("edit_document");
-  if (/bib|cit/.test(name)) return has("check_bibtex");
+  if (/bib|cit/.test(name) || (/check|verify|validate/.test(name) && /ref/.test(name))) {
+    return has("check_bibtex");
+  }
+  if (/ask|question|choice|choose|clarif|confirm|select_option/.test(name)) return has("ask_user");
   if (/compile|build|check|verify/.test(name)) return has("compile_check");
   if (/python|execute|run_|script|calc/.test(name)) return has("run_python");
   if (/fetch|url|scrape|crawl|visit|open_?page|get_?page|web_?page/.test(name)) return has("fetch_url");
@@ -58,8 +69,11 @@ export function normalizeToolArgs(
       if (new_string !== undefined) out.new_string = new_string;
       return out;
     }
-    case "web_search": {
-      const query = str(args.query) ?? str(args.q) ?? str(args.input) ?? str(args.text) ?? str(args.search);
+    case "web_search":
+    case "find_references": {
+      const query =
+        str(args.query) ?? str(args.q) ?? str(args.topic) ?? str(args.claim) ??
+        str(args.input) ?? str(args.text) ?? str(args.search);
       const out: Record<string, unknown> = {};
       if (query !== undefined) out.query = query;
       if (typeof args.max_results === "number") out.max_results = args.max_results;
@@ -77,6 +91,14 @@ export function normalizeToolArgs(
     }
     case "view_pdf":
       return typeof args.max_pages === "number" ? { max_pages: args.max_pages } : {};
+    case "ask_user": {
+      const question = str(args.question) ?? str(args.prompt) ?? str(args.q) ?? str(args.text);
+      const options = args.options ?? args.choices ?? args.answers ?? args.buttons;
+      const out: Record<string, unknown> = {};
+      if (question !== undefined) out.question = question;
+      if (Array.isArray(options)) out.options = options.map(String);
+      return out;
+    }
     case "ats_check": {
       const jd = str(args.job_description) ?? str(args.job) ?? str(args.jd) ?? str(args.description);
       return jd !== undefined ? { job_description: jd } : {};
@@ -92,7 +114,10 @@ export function hasRequiredArgs(name: string, args: Record<string, unknown>): bo
     case "edit_document":
       return typeof args.new_string === "string";
     case "web_search":
+    case "find_references":
       return typeof args.query === "string";
+    case "ask_user":
+      return typeof args.question === "string" && Array.isArray(args.options);
     case "run_python":
       return typeof args.code === "string";
     case "fetch_url":

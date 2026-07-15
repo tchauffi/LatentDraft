@@ -4,6 +4,7 @@ import {
   effectiveOllamaContext,
   ensureOllamaContextVariant,
   isOllamaCloudModel,
+  modelSupportsVision,
 } from "../src/providers.js";
 
 // The window reported to the UI must be where truncation ACTUALLY starts:
@@ -34,4 +35,23 @@ test("ensureOllamaContextVariant leaves cloud models untouched", async () => {
   // Cloud models run remotely — no local num_ctx variant must be created.
   // This must short-circuit BEFORE any network call to the Ollama daemon.
   assert.equal(await ensureOllamaContextVariant("gpt-oss:120b-cloud"), "gpt-oss:120b-cloud");
+});
+
+test("modelSupportsVision honors OPENAI_VISION_MODELS for openai-compatible", async (t) => {
+  const prev = process.env.OPENAI_VISION_MODELS;
+  t.after(() => {
+    if (prev === undefined) delete process.env.OPENAI_VISION_MODELS;
+    else process.env.OPENAI_VISION_MODELS = prev;
+  });
+
+  delete process.env.OPENAI_VISION_MODELS;
+  assert.equal(await modelSupportsVision("openai-compatible", "gpt-4o"), false);
+
+  process.env.OPENAI_VISION_MODELS = "gpt-4o, qwen-vl-max";
+  assert.equal(await modelSupportsVision("openai-compatible", "gpt-4o"), true);
+  assert.equal(await modelSupportsVision("openai-compatible", "qwen-vl-max"), true);
+  assert.equal(await modelSupportsVision("openai-compatible", "gpt-4o-mini"), false);
+
+  // Anthropic stays unconditionally multimodal.
+  assert.equal(await modelSupportsVision("anthropic", "claude-sonnet-5"), true);
 });

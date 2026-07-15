@@ -19,6 +19,9 @@ const KNOWN = new Set([
   "view_pdf",
   "ats_check",
   "fetch_url",
+  "check_bibtex",
+  "find_references",
+  "ask_user",
 ]);
 
 /** Run the filter over the input in chunks and return the outcome. */
@@ -142,6 +145,27 @@ test("normalizeToolName routes fetch-style aliases to fetch_url, not web_search"
   // Search-style names still land on web_search.
   assert.equal(normalizeToolName("google_search", KNOWN), "web_search");
   assert.equal(normalizeToolName("browse", KNOWN), "web_search");
+});
+
+test("normalizeToolName routes discovery aliases to find_references, checks to check_bibtex", () => {
+  assert.equal(normalizeToolName("find_papers", KNOWN), "find_references");
+  assert.equal(normalizeToolName("search_references", KNOWN), "find_references");
+  assert.equal(normalizeToolName("lookup_citation", KNOWN), "find_references");
+  assert.equal(normalizeToolName("search_arxiv", KNOWN), "find_references");
+  // Verification-style names still land on check_bibtex.
+  assert.equal(normalizeToolName("check_references", KNOWN), "check_bibtex");
+  assert.equal(normalizeToolName("verify_citations", KNOWN), "check_bibtex");
+  assert.equal(normalizeToolName("check_bibliography", KNOWN), "check_bibtex");
+});
+
+test("normalizeToolName and arg aliases route question-style calls to ask_user", () => {
+  assert.equal(normalizeToolName("ask_question", KNOWN), "ask_user");
+  assert.equal(normalizeToolName("clarify", KNOWN), "ask_user");
+  assert.equal(normalizeToolName("user_choice", KNOWN), "ask_user");
+  assert.deepEqual(
+    normalizeToolArgs("ask_user", { prompt: "Which one?", choices: ["a", "b"] }),
+    { question: "Which one?", options: ["a", "b"] },
+  );
 });
 
 test("normalizeToolArgs maps aliased fetch_url keys onto url", () => {

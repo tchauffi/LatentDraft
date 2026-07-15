@@ -18,7 +18,7 @@ const HIDDEN_DIRS = new Set([".latentdraft", ".git"]);
 
 /** Files served/edited as text; everything else is binary (preview-only).
  * Dotfiles (.gitignore) are text. */
-const TEXT_EXT = /(\.(tex|bib|sty|cls|txt|md|csv|tsv|json|dat|mmd|py|yml|yaml)|(^|\/)\.[a-z]+)$/i;
+const TEXT_EXT = /(\.(tex|bib|sty|cls|txt|md|csv|tsv|json|dat|mmd|py|sh|yml|yaml)|(^|\/)\.[a-z]+)$/i;
 
 export function isTextPath(rel: string): boolean {
   return TEXT_EXT.test(rel);
@@ -307,6 +307,73 @@ export async function listFilesInDir(dir: string): Promise<ProjectFileInfo[] | u
     }
   }
   return files.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * All directories in a project (project-relative, sorted), so the file tree
+ * can show EMPTY folders too — `listFilesInDir` alone can't represent them.
+ */
+export async function listDirsInDir(dir: string): Promise<string[] | undefined> {
+  let names: string[];
+  try {
+    names = (await readdir(dir, { recursive: true })) as string[];
+  } catch {
+    return undefined; // project doesn't exist
+  }
+  const dirs: string[] = [];
+  for (const name of names) {
+    const rel = name.split(path.sep).join("/");
+    if (HIDDEN_DIRS.has(rel.split("/")[0])) continue;
+    try {
+      if ((await stat(path.join(dir, name))).isDirectory()) dirs.push(rel);
+    } catch {
+      /* raced */
+    }
+  }
+  return dirs.sort();
+}
+
+/** Create a directory in a project (parents included; already-exists is fine). */
+export async function createProjectDir(
+  id: string,
+  rel: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const dir = projectDir(id);
+  const norm = rel && safeProjectFilePath(rel);
+  if (!dir || !norm) return { ok: false, error: "Invalid project or path." };
+  try {
+    if (!(await stat(dir)).isDirectory()) return { ok: false, error: "Project not found." };
+  } catch {
+    return { ok: false, error: "Project not found." };
+  }
+  try {
+    await mkdir(path.join(dir, norm), { recursive: true });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/** Delete a project directory AND its contents. */
+export async function deleteProjectDir(
+  id: string,
+  rel: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const dir = projectDir(id);
+  const norm = rel && safeProjectFilePath(rel);
+  if (!dir || !norm) return { ok: false, error: "Invalid project or path." };
+  const target = path.join(dir, norm);
+  try {
+    if (!(await stat(target)).isDirectory()) return { ok: false, error: "Not a directory." };
+  } catch {
+    return { ok: false, error: "Directory not found." };
+  }
+  try {
+    await rm(target, { recursive: true });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
 }
 
 export async function readProjectFile(

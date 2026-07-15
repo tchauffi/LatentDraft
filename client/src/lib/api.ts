@@ -1,3 +1,5 @@
+import type { SkillInfo } from "./slashCommands";
+
 export interface ProviderInfo {
   id: "ollama" | "ollama-cloud" | "openai-compatible" | "anthropic";
   label: string;
@@ -97,10 +99,40 @@ export async function deleteProjectApi(id: string): Promise<{ ok: boolean; error
   return res.ok ? { ok: true } : { ok: false, error: data.error };
 }
 
-export async function fetchProjectFiles(id: string): Promise<ProjectFileInfo[]> {
+export async function fetchProjectFiles(
+  id: string,
+): Promise<{ files: ProjectFileInfo[]; dirs: string[] }> {
   const res = await fetch(`/api/projects/${encodeURIComponent(id)}/files`);
   if (!res.ok) throw new Error(`project files: ${res.status}`);
-  return ((await res.json()) as { files: ProjectFileInfo[] }).files;
+  const data = (await res.json()) as { files: ProjectFileInfo[]; dirs?: string[] };
+  return { files: data.files, dirs: data.dirs ?? [] };
+}
+
+/** Create a directory — empty folders are real project entries. */
+export async function createProjectDirApi(
+  id: string,
+  path: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}/dir`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error };
+}
+
+/** Delete a directory and everything in it. */
+export async function deleteProjectDirApi(
+  id: string,
+  path: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(
+    `/api/projects/${encodeURIComponent(id)}/dir?path=${encodeURIComponent(path)}`,
+    { method: "DELETE" },
+  );
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error };
 }
 
 export function projectFileUrl(id: string, path: string): string {
@@ -260,6 +292,15 @@ export async function fetchProviders(): Promise<ProviderInfo[]> {
   return data.providers;
 }
 
+/** Installed SKILL.md packs — become slash commands and agent-loadable skills. */
+export async function fetchSkills(projectId?: string): Promise<SkillInfo[]> {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  const res = await fetch(`/api/skills${qs}`);
+  if (!res.ok) throw new Error(`skills: ${res.status}`);
+  const data = (await res.json()) as { skills: SkillInfo[] };
+  return data.skills;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -276,11 +317,18 @@ export interface ToolActivity {
   ok: boolean;
 }
 
+/** A question from the agent with clickable answer choices (ask_user tool). */
+export interface AskChoices {
+  question: string;
+  options: string[];
+}
+
 export interface StreamHandlers {
   onText: (text: string) => void;
   onEdit: (edit: ProposedEdit) => void;
   onCheck: (check: CheckResult) => void;
   onTool: (tool: ToolActivity) => void;
+  onAsk: (ask: AskChoices) => void;
   onError: (message: string) => void;
   onDone: () => void;
 }
@@ -356,6 +404,14 @@ export async function streamChat(
           summary: String(evt.summary ?? ""),
           ok: Boolean(evt.ok),
         });
+        break;
+      case "ask":
+        if (Array.isArray(evt.options) && evt.options.length > 0) {
+          handlers.onAsk({
+            question: String(evt.question ?? ""),
+            options: evt.options.map(String),
+          });
+        }
         break;
       case "error":
         handlers.onError(String(evt.message ?? "error"));

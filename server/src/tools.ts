@@ -17,11 +17,19 @@ import { renderMermaid, renderMermaidIn } from "./mermaid.js";
 import { renderPdf, extractPdfText, analyzePdfLayout } from "./pdftools.js";
 import { formatLayoutReport } from "./layout.js";
 import { analyzeAts } from "./ats.js";
-import { checkBibtex, type BibEntry } from "./bibcheck.js";
+import { checkBibtex, extractBibEntries, extractBibitems, type BibEntry } from "./bibcheck.js";
 import { verifyEntries, formatVerifyReport, type VerifyResult } from "./bibverify.js";
+import { findReferences, type ExistingRef } from "./refsearch.js";
+import type { Skill } from "./skills.js";
 import path from "node:path";
 
 const MAIN = "main.tex";
+
+/** Every mutating tool refuses with this once ask_user has run this turn. */
+const ASKED_BLOCK_MSG =
+  "NOT APPLIED: you asked the user a question with ask_user — their answer choices are on " +
+  "screen. STOP and end your turn now; make no further changes until they answer in the " +
+  "next message.";
 
 export interface EditEvent {
   id: string;
@@ -43,6 +51,12 @@ export interface ToolEvent {
   /** Short human-readable summary for the chat activity line. */
   summary: string;
   ok: boolean;
+}
+
+export interface AskEvent {
+  question: string;
+  /** 2–5 short answer choices, rendered as clickable buttons in the chat. */
+  options: string[];
 }
 
 type ApplyResult =
@@ -81,6 +95,14 @@ export interface AgentToolsOptions {
   emitCheck: (c: CheckEvent) => void;
   /** Optional: surface non-edit tool activity (search, python, pdf, ats) to the UI. */
   emitTool?: (e: ToolEvent) => void;
+  /** Optional: show the user a question with clickable answer choices (ask_user). */
+  emitAsk?: (a: AskEvent) => void;
+  /** User-authored SKILL.md instruction packs; when non-empty, the model gets a
+   * `skill` tool to load one and the system prompt lists them. */
+  skills?: Skill[];
+  /** True when the selected model accepts image parts: view_pdf renders at a
+   * readable dpi and announces that the pages will be attached for viewing. */
+  vision?: boolean;
   /** Injectable fetch for fetch_url — tests stay offline. */
   fetchFn?: typeof fetch;
 }
@@ -114,6 +136,18 @@ export function createAgentTools(opts: AgentToolsOptions) {
      * attach as image parts. Tool results themselves are serialized text, so
      * inlining base64 there would flood the model's context. */
     renderedImages: [] as string[],
+    /** true once ask_user ran this turn: the user must answer before anything
+     * else changes, so mutating tools refuse and chat.ts ends the turn. */
+    asked: false,
+    /** true once a vision model got rendered pages this turn (view_pdf). */
+    viewed: false,
+    /** Page budget of the last view_pdf — the recheck re-renders as many, so
+     * a 12-page deck review is re-verified on all 12 pages, not 3. */
+    lastViewPages: 3,
+    /** Edits applied since the model last SAW the pages — drives the
+     * end-of-turn visual recheck, so a fix made from the images is itself
+     * verified visually instead of taken on faith. */
+    editsSinceView: 0,
   };
   let editSeq = 0;
   /** Signatures of edits already applied this turn — weak models love to repeat themselves. */
@@ -122,6 +156,28 @@ export function createAgentTools(opts: AgentToolsOptions) {
   const projectDir = opts.projectDir;
   /** Where run_python / render_mermaid write figures. */
   const workDir = projectDir ?? sessionDir(opts.compileSessionId);
+
+  /**
+   * Queue freshly produced image files for the vision feedback message —
+   * chat.ts attaches whatever is pending once the round ends, so a vision
+   * model SEES the figure it just generated and can iterate on it.
+   * No-op for text-only models. Returns how many images were queued.
+   */
+  async function queueImagesForVision(names: string[]): Promise<number> {
+    if (!opts.vision) return 0;
+    let queued = 0;
+    for (const name of names.filter((n) => /\.(png|jpe?g)$/i.test(n)).slice(0, 4)) {
+      try {
+        const buf = await readFile(path.join(workDir, name));
+        if (buf.byteLength > 4 * 1024 * 1024) continue; // don't flood the context
+        state.renderedImages.push(buf.toString("base64"));
+        queued++;
+      } catch {
+        /* unreadable — skip it */
+      }
+    }
+    return queued;
+  }
 
   /** Resolve a tool's `file` argument to a normalized project path, or an error string. */
   function resolveTarget(file: string | undefined): { path: string } | { error: string } {
@@ -242,6 +298,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       new_string: z.string().describe("Replacement text."),
     }),
     execute: async ({ context }) => {
+      if (state.asked) return ASKED_BLOCK_MSG;
       let { old_string, new_string } = context;
       const { explanation, file } = context;
       const target = resolveTarget(file);
@@ -300,6 +357,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       }
       state.docs.set(target.path, res.doc);
       state.edits += 1;
+      state.editsSinceView += 1;
       state.dirty = true;
       if (/\.(tex|bib)$/i.test(target.path)) state.bibDirty = true;
       appliedSigs.add(sig);
@@ -382,6 +440,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       explanation: z.string().optional().describe("One short sentence: why this file."),
     }),
     execute: async ({ context: { path: rel, content, explanation } }) => {
+      if (state.asked) return ASKED_BLOCK_MSG;
       if (!projectDir) {
         return `NOT CREATED: this session has no project — put everything in ${MAIN}.`;
       }
@@ -394,6 +453,7 @@ export function createAgentTools(opts: AgentToolsOptions) {
       }
       state.docs.set(norm, content);
       state.edits += 1;
+      state.editsSinceView += 1;
       state.dirty = true;
       if (/\.(tex|bib)$/i.test(norm)) state.bibDirty = true;
       const id = `edit-${++editSeq}`;
@@ -506,16 +566,22 @@ export function createAgentTools(opts: AgentToolsOptions) {
       const filesLine = res.createdFiles.length
         ? `\n\nFiles created (reference by bare filename in \\includegraphics): ${res.createdFiles.join(", ")}`
         : "\n\n(No new files were created.)";
+      const queued = await queueImagesForVision(res.createdFiles);
       emitTool({
         name: "run_python",
         summary: res.createdFiles.length
-          ? `Ran Python → ${res.createdFiles.join(", ")}`
+          ? `Ran Python → ${res.createdFiles.join(", ")}${queued ? " — figure attached" : ""}`
           : "Ran Python",
         ok: res.ok,
       });
+      const seeNote = queued
+        ? "\n\nThe generated figure(s) are attached as images in the next message — LOOK at " +
+          "them and check they are correct and readable (labels, legends, axes, nothing cut " +
+          "off or overlapping). Regenerate with fixed code if not."
+        : "";
       return `${res.ok ? "Python ran successfully." : "Python exited with an error."}\n\nOutput:\n${
         res.output || "(no output)"
-      }${filesLine}`;
+      }${filesLine}${seeNote}`;
     },
   });
 
@@ -540,13 +606,20 @@ export function createAgentTools(opts: AgentToolsOptions) {
       const res = projectDir
         ? await renderMermaidIn(projectDir, code, filename)
         : await renderMermaid(opts.compileSessionId, code, filename);
+      const queued = res.ok && res.file ? await queueImagesForVision([res.file]) : 0;
       emitTool({
         name: "render_mermaid",
-        summary: res.ok ? `Rendered diagram → ${res.file}` : "Mermaid render failed",
+        summary: res.ok
+          ? `Rendered diagram → ${res.file}${queued ? " — diagram attached" : ""}`
+          : "Mermaid render failed",
         ok: res.ok,
       });
+      const seeNote = queued
+        ? ` The rendered diagram is attached as an image in the next message — LOOK at it and ` +
+          `check the structure, labels, and readability; re-render with fixed source if not.`
+        : "";
       return res.ok
-        ? `Diagram rendered to ${res.file}. Now add it to the document with edit_document, ` +
+        ? `Diagram rendered to ${res.file}.${seeNote} Now add it to the document with edit_document, ` +
             `e.g. \\includegraphics[width=0.9\\textwidth]{${res.file}} (inside a figure ` +
             `environment if it needs a caption), then compile_check.`
         : `Mermaid rendering FAILED. Fix the diagram source and call render_mermaid again.\n\n${res.output}`;
@@ -563,35 +636,75 @@ export function createAgentTools(opts: AgentToolsOptions) {
       "near-empty trailing pages, and font usage. Call it after formatting changes or " +
       "when the user asks about layout/appearance, then FIX the issues it reports.",
     inputSchema: z.object({
-      max_pages: z.number().int().min(1).max(5).optional().describe("Pages to render (default 3)."),
+      max_pages: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe(
+          "Pages to render (default 3). Reviewing a whole slide deck or long document? " +
+            "Pass its full page count so you see EVERY page, up to 20.",
+        ),
     }),
     execute: async ({ context: { max_pages } }) => {
       state.renderedImages = [];
-      const compiled = await compileToPdf();
-      if (!compiled.ok) {
+      state.lastViewPages = max_pages ?? 3;
+      const r = await renderPages(state.lastViewPages);
+      if (!r.ok) {
         emitTool({ name: "view_pdf", summary: "Could not render — compile failed", ok: false });
-        return `Cannot view the PDF — it does not compile:\n\n${compiled.log}`;
+        return `Cannot view the PDF — it does not compile:\n\n${r.log}`;
       }
-      let report = "";
-      try {
-        const layout = await analyzePdfLayout(compiled.pdf);
-        report = formatLayoutReport(layout, compiled.log);
-      } catch (err) {
-        report = `(layout analysis failed: ${String(err)})`;
-      }
-      try {
-        const prefix = projectDir
-          ? path.join(projectDir, ".latentdraft", "preview")
-          : path.join(sessionDir(opts.compileSessionId), "preview");
-        const pages = await renderPdf(compiled.pdf, prefix, max_pages ?? 3);
-        state.renderedImages = pages.map((p) => p.base64);
-        emitTool({ name: "view_pdf", summary: `Inspected layout (${pages.length} page(s) rendered)`, ok: true });
-      } catch {
+      state.renderedImages = r.images;
+      if (r.images.length > 0) {
+        if (opts.vision) {
+          state.viewed = true;
+          state.editsSinceView = 0;
+        }
+        emitTool({
+          name: "view_pdf",
+          summary: `Inspected layout (${r.images.length} page(s) rendered${opts.vision ? " — pages attached" : ""})`,
+          ok: true,
+        });
+      } else {
         emitTool({ name: "view_pdf", summary: "Inspected layout (render failed)", ok: true });
       }
-      return `Compiled successfully. Layout report:\n${report}`;
+      const visionNote =
+        opts.vision && r.images.length > 0
+          ? "\n\nThe rendered page images are attached in the next message — inspect them " +
+            "before deciding the layout is fine. If you then edit based on what you see, " +
+            "run view_pdf again afterward to visually confirm the fix."
+          : "";
+      return `Compiled successfully. Layout report:\n${r.report}${visionNote}`;
     },
   });
+
+  /**
+   * Compile the working state and render its first pages — the shared engine
+   * behind view_pdf and the end-of-turn vision recheck.
+   */
+  async function renderPages(
+    maxPages: number,
+  ): Promise<{ ok: true; report: string; images: string[] } | { ok: false; log: string }> {
+    const compiled = await compileToPdf();
+    if (!compiled.ok) return { ok: false, log: compiled.log };
+    let report = "";
+    try {
+      report = formatLayoutReport(await analyzePdfLayout(compiled.pdf), compiled.log);
+    } catch (err) {
+      report = `(layout analysis failed: ${String(err)})`;
+    }
+    try {
+      const prefix = projectDir
+        ? path.join(projectDir, ".latentdraft", "preview")
+        : path.join(sessionDir(opts.compileSessionId), "preview");
+      // Vision models READ the pages, not just measure them — render sharper.
+      const pages = await renderPdf(compiled.pdf, prefix, maxPages, opts.vision ? 150 : 110);
+      return { ok: true, report, images: pages.map((p) => p.base64) };
+    } catch {
+      return { ok: true, report, images: [] };
+    }
+  }
 
   const ats_check = createTool({
     id: "ats_check",
@@ -701,6 +814,117 @@ export function createAgentTools(opts: AgentToolsOptions) {
     },
   });
 
+  const find_references = createTool({
+    id: "find_references",
+    description:
+      "Search real scholarly databases (Crossref + arXiv) for papers matching a topic, a " +
+      "claim that needs a citation, or a half-remembered title. Returns candidates with " +
+      "ready-to-insert BibTeX built verbatim from the real records. ALWAYS use this instead " +
+      "of writing a .bib entry from memory — memory invents papers. Present the candidates " +
+      "to the user, insert the chosen block into the .bib unchanged, and \\cite its key.",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .describe("What to find a source for: a topic, the claim itself, a distinctive title phrase, or author + topic."),
+      max_results: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .optional()
+        .describe("Candidates to return (default 5)."),
+    }),
+    execute: async ({ context: { query, max_results } }) => {
+      // Existing entries: flag candidates already in the bibliography and
+      // keep generated keys from colliding with keys already in use.
+      const files = await gatherBibFiles();
+      const existing: ExistingRef[] = [];
+      for (const [file, content] of Object.entries(files)) {
+        if (/\.bib$/i.test(file)) {
+          for (const e of extractBibEntries(file, content)) {
+            existing.push({ key: e.key, title: e.title, doi: e.doi });
+          }
+        } else {
+          for (const b of extractBibitems(file, content)) existing.push({ key: b.key });
+        }
+      }
+      const res = await findReferences(query, max_results ?? 5, existing, opts.fetchFn ?? fetch);
+      emitTool({ name: "find_references", summary: res.summary, ok: res.ok });
+      return res.report;
+    },
+  });
+
+  const ask_user = createTool({
+    id: "ask_user",
+    description:
+      "Ask the user ONE question with 2–5 clickable answer choices, when you need a " +
+      "decision or a missing detail to proceed — which file to work on, whether to apply " +
+      "a plan, which reference candidate to insert, what a venue's page limit is. The " +
+      "choices render as buttons in the chat (with a free-text field for a custom " +
+      "answer). The answer arrives as the NEXT user message, so after calling this, END " +
+      "YOUR TURN and wait. Do not use it for anything already answered in the " +
+      "conversation, and never re-ask the same question.",
+    inputSchema: z.object({
+      question: z.string().describe("The question, one short sentence."),
+      options: z
+        .array(z.string())
+        .min(2)
+        .max(5)
+        .describe("2–5 short, distinct answer choices (put your recommended one first)."),
+    }),
+    execute: async ({ context: { question, options } }) => {
+      if (state.asked) {
+        return (
+          "NOT SHOWN: you already asked the user a question this turn. END YOUR TURN and " +
+          "wait for their answer — one question at a time."
+        );
+      }
+      const cleaned = options.map((o) => o.trim()).filter(Boolean).slice(0, 5);
+      if (cleaned.length < 2) {
+        return "NOT SHOWN: provide at least 2 non-empty answer choices.";
+      }
+      state.asked = true;
+      opts.emitAsk?.({ question: question.trim(), options: cleaned });
+      return (
+        "The question and its answer buttons are now shown to the user. END YOUR TURN " +
+        "NOW with a brief plain-text sentence (do not repeat the options — they are " +
+        "already on screen). Document changes are blocked until the user answers; their " +
+        "answer will arrive as the next message."
+      );
+    },
+  });
+
+  // User-authored SKILL.md packs. Skill names are [a-z-] and every tool id
+  // contains an underscore, so a skill can never shadow a tool.
+  const skills = opts.skills ?? [];
+  const skillList = () =>
+    skills.map((s) => `${s.name} — ${s.description}`).join("\n");
+  const skill = createTool({
+    id: "skill",
+    description:
+      "Load a user-installed skill: a reusable instruction pack for a specific kind of " +
+      "task. Call it when the user invokes /<skill-name> or when their request matches a " +
+      "skill's description (the system prompt lists them), then follow the returned " +
+      "instructions for the rest of the turn.",
+    inputSchema: z.object({
+      name: z.string().describe("The skill's name, exactly as listed."),
+    }),
+    execute: async ({ context: { name } }) => {
+      const found = skills.find((s) => s.name === name.trim().toLowerCase());
+      if (!found) {
+        opts.emitTool?.({ name: "skill", summary: `unknown skill '${name}'`, ok: false });
+        return skills.length
+          ? `Unknown skill '${name}'. Installed skills:\n${skillList()}`
+          : "No skills are installed.";
+      }
+      opts.emitTool?.({ name: "skill", summary: `loaded ${found.name}`, ok: true });
+      return (
+        `Instructions from skill '${found.name}' — follow them for the current task:\n\n` +
+        found.body
+      );
+    },
+  });
+
   /**
    * Authoritative end-of-turn verification. Runs a compile if the document
    * changed since the last check (or was never checked), emits the result, and
@@ -732,6 +956,28 @@ export function createAgentTools(opts: AgentToolsOptions) {
     return runBibCheck(state.bibOnline);
   }
 
+  /**
+   * End-of-turn visual recheck, mirroring finalize()/finalizeBib(): a vision
+   * model that edited AFTER seeing the rendered pages must look at the result
+   * of its own fix. Re-compiles and re-renders; chat.ts feeds the pages back
+   * for one more look. Returns undefined when the document no longer compiles
+   * (the compile enforcement owns that) or nothing could be rendered.
+   */
+  async function renderForVisionRecheck(): Promise<
+    { report: string; images: string[] } | undefined
+  > {
+    const r = await renderPages(state.lastViewPages);
+    if (!r.ok || r.images.length === 0) return undefined;
+    state.viewed = true;
+    state.editsSinceView = 0;
+    opts.emitTool?.({
+      name: "view_pdf",
+      summary: `Re-rendered after edits (${r.images.length} page(s) — pages attached)`,
+      ok: true,
+    });
+    return { report: r.report, images: r.images };
+  }
+
   return {
     tools: {
       edit_document,
@@ -746,17 +992,27 @@ export function createAgentTools(opts: AgentToolsOptions) {
       view_pdf,
       ats_check,
       check_bibtex,
+      find_references,
+      ask_user,
+      // Only offered when skills exist — a tool that can only say "none
+      // installed" would just invite pointless calls.
+      ...(skills.length ? { skill } : {}),
     },
     getDoc: () => state.docs.get(MAIN) ?? "",
     /** True once the agent has compiled at least once this turn — after that,
      * the editor's pre-turn compile log is stale and should stop being shown. */
     hasChecked: () => state.lastCheck !== undefined,
-    /** Base64 PNG pages from the most recent view_pdf; clears on read. */
+    /** True once ask_user ran this turn — the turn must end and wait for the answer. */
+    hasAsked: () => state.asked,
+    /** Pending vision images (view_pdf pages, generated figures); clears on read. */
     takeRenderedImages: (): string[] => {
       const imgs = state.renderedImages;
       state.renderedImages = [];
       return imgs;
     },
+    /** True when a vision model edited after its last look at the pages. */
+    needsVisionRecheck: () => state.viewed && state.editsSinceView > 0,
+    renderForVisionRecheck,
     finalize,
     finalizeBib,
   };
@@ -769,11 +1025,20 @@ export function buildSystemPrompt(
   editorCompileLog?: string,
   /** True when the agent works on a project: file param + create_file available. */
   multiFile = false,
+  /** Installed SKILL.md packs, listed so the model knows when to load one. */
+  skills: Pick<Skill, "name" | "description">[] = [],
 ): string {
   const auxNote = auxFiles.length
     ? multiFile
       ? `\n\nProject files besides main.tex: ${auxFiles.join(", ")}. Read any text file with read_document({file: "…"}) and edit it with edit_document({file: "…", …}); create new ones with create_file. Files resolve relative to the project root (\\input{sections/intro}, \\bibliography{refs}, \\includegraphics{figure.png}).`
       : `\n\nThe compile directory also contains these project files (usable via \\input, \\bibliography, \\includegraphics): ${auxFiles.join(", ")}. You can only edit main.tex.`
+    : "";
+  const skillsNote = skills.length
+    ? `\n\nInstalled skills (user-authored instruction packs), loadable with the skill tool:\n${skills
+        .map((s) => `- ${s.name}: ${s.description}`)
+        .join(
+          "\n",
+        )}\nWhen the user invokes /<skill-name>, or their request matches a skill's description, call skill({name}) FIRST and follow the returned instructions for the rest of the turn. Do not guess at a skill's content — load it.`
     : "";
   const compileNote = editorCompileLog
     ? `\n\nWhen the user sent this message, the editor's last compile of this document had FAILED with the log below. Base your fix on it: fix the reported cause with edit_document, then compile_check until it succeeds.\n<compile_log>\n${truncate(editorCompileLog, 2000)}\n</compile_log>`
@@ -790,9 +1055,11 @@ You have tools:
 - fetch_url(url): fetch one specific web page and get its readable text. Use it when you HAVE a URL (a job posting, an article) — web_search finds pages, fetch_url reads one. If it returns little or no text (login wall, scripted page), ask the user to paste the content instead of guessing.
 - run_python(code): run Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Uploaded data files (CSV/Excel) are in the same directory: pd.read_csv("data.csv") / pd.read_excel("data.xlsx"), then plot with seaborn. Reference files by bare filename; do not call plt.show().
 - render_mermaid(code, filename?): render a Mermaid DIAGRAM (flowchart, sequence, class, state, ER, gantt, pie, mindmap) to a PNG in the build directory. Prefer it over Python for conceptual/structural diagrams. Pass raw Mermaid source (no fences), then edit_document to add \\includegraphics{<filename>}.
-- view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm.
+- view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm. Reviewing a slide deck or a whole multi-page document? Pass max_pages set to its page count (up to 20) so EVERY page is inspected — the default renders only the first 3.
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
 - check_bibtex(verify_online?): verify the bibliography — every \\cite key vs the .bib entries / \\bibitem definitions, AND each cited entry vs real-world sources (Crossref DOI, arXiv, title search) to catch hallucinated references (invented papers, fake or mismatched DOIs). Use it whenever the user asks about citations/references/bibliography or after writing bibliography entries.
+- find_references(query, max_results?): search Crossref + arXiv for REAL papers on a topic/claim/title and get candidates with ready-to-insert BibTeX. Whenever a new bibliography entry is needed (the user wants a citation, or you want to cite something), get it from find_references — NEVER write a .bib entry from memory.
+- ask_user(question, options): show the user ONE question with 2–5 clickable answer choices (plus a free-text field). Their answer arrives as the NEXT user message — call it, then END YOUR TURN and wait. Once asked, document changes are BLOCKED until they answer, so never ask and then keep working.
 
 Tool guidance:
 - Invoke tools ONLY through the native tool/function-calling mechanism. NEVER print tool-call JSON (like {"name": "edit_document", ...}) or <tool_call> tags as part of your reply text — that is not a tool call and does nothing.
@@ -801,6 +1068,10 @@ Tool guidance:
 - Research is for gathering facts, not the goal. Do a FEW focused web_search calls (typically 2–4), then STOP and start writing. Do not keep searching once you have enough to write a solid first draft.
 - For a resume/CV, a good loop is: research briefly → write the document with edit_document → compile_check → view_pdf to sanity-check the layout → ats_check (with the job description if provided) → apply the improvements it suggests. Never fabricate experience to match keywords.
 - When the user asks to TAILOR a resume to a job posting (e.g. via /apply): get the posting text (fetch_url for a URL), run ats_check with it, then present a review and a NUMBERED improvement plan and STOP — do not edit until the user approves. After approval, apply the plan with edit_document, compile_check, and re-run ats_check with the same job description.
+- When the user needs a CITATION for a claim or topic (e.g. via /find-refs): call find_references (1–3 focused queries), present the candidates (title, authors, year, venue), then insert the best match's BibTeX block into the .bib EXACTLY as returned and add \\cite{key} where the claim is made — each insertion is an accept/reject diff, so the user can reject and pick another candidate. If no candidate genuinely matches, say so; NEVER fabricate an entry or alter a returned block's bibliographic fields.
+- When the user asks to PROOFREAD/review the writing (e.g. via /review): read every relevant file first, then present the findings and a NUMBERED fix plan quoting the exact text at each location, and STOP — do not edit until the user approves.
+- When the user asks whether the document meets SUBMISSION requirements (e.g. via /check-submission): establish the venue's requirements (from what they gave you, or web_search the venue's author guidelines), run view_pdf for the real page count/margins/fonts, read the source for anonymization leaks if required (\\author, emails, \\thanks, acknowledgements, "our previous work"), then report a pass/fail checklist and a NUMBERED fix plan and STOP — do not edit until the user approves.
+- When you are BLOCKED on a decision only the user can make — approve a numbered plan, pick between files, choose a reference candidate, supply a missing detail — ask it with ask_user (recommended choice first) instead of ending the turn with an open question in prose. One focused question per turn; don't ask what the conversation already answers, and don't use it to ask permission for ordinary edits (the accept/reject diff cards are the permission).
 - You do NOT have any other tools (no shell, no file system, no "google"). If you need external info, use web_search.
 
 Workflow when the user reports a BROKEN document ("it doesn't compile", "fix the errors", red log in the editor):
@@ -829,5 +1100,5 @@ Rules:
 Current document:
 <document>
 ${documentText}
-</document>${auxNote}${compileNote}`;
+</document>${auxNote}${skillsNote}${compileNote}`;
 }

@@ -7,7 +7,7 @@ A local latex editor boosted by agents. Three panes:
 
 - **Editor** — multi-file LaTeX source (CodeMirror) with autocomplete (`\cite{`/`\ref{` keys extracted from your project), inline compile-error squiggles, and SyncTeX (Ctrl/Cmd+click a source line to jump the PDF; double-click the PDF to jump to the source)
 - **Preview** — the compiled PDF, live-updating as you type
-- **Chat** — an AI agent that reads and edits **any project file** (proposed as accept/reject diffs), creates files, generates figures, and can auto-fix compile failures. Slash commands (type `/` for autocomplete): `/check-bibtex` verifies your references — including that the cited papers actually exist; `/apply <job-url>` tailors your resume to a job posting, plan first, edits only after you approve
+- **Chat** — an AI agent that reads and edits **any project file** (proposed as accept/reject diffs), creates files, generates figures, and can auto-fix compile failures. When it needs a decision, it asks with **clickable answer choices** (plus a free-text "Other…"). Slash commands (type `/` for autocomplete): `/check-bibtex` verifies your references — including that the cited papers actually exist; `/find-refs` finds real papers to cite (Crossref/arXiv) and inserts their BibTeX; `/review` proofreads with a numbered fix plan; `/check-submission` checks page limits, margins, and anonymization against a venue's rules; `/apply <job-url>` tailors your resume to a job posting — the plan-first commands only edit after you approve
 
 **Projects are plain folders** under `~/LatentDraft` (or `PROJECTS_ROOT`): normal `.tex`/`.bib`/figure files you can `git init`, edit with other tools, or drop an existing paper into. Everything autosaves; build artifacts stay out of the way in `.latentdraft/` (gitignored automatically). New projects start from a template gallery (article, beamer, CV).
 
@@ -66,6 +66,7 @@ The server reads these at startup (plain environment variables — there is no `
 | Variable            | Default                  | Purpose                                              |
 | ------------------- | ------------------------ | ---------------------------------------------------- |
 | `PROJECTS_ROOT`     | `~/LatentDraft`          | Directory holding the project folders                |
+| `SKILLS_ROOT`       | `~/.latentdraft/skills`  | Directory holding global [skills](#skills-bring-your-own-commands) |
 | `PORT`              | `5174`                   | API server port                                      |
 | `HOST`              | `127.0.0.1`              | Bind address. Keep localhost — `run_python` executes arbitrary code |
 | `COMPILE_TIMEOUT_MS`| `300000`                 | Kill a Tectonic compile after this many ms           |
@@ -78,6 +79,7 @@ The server reads these at startup (plain environment variables — there is no `
 | `OPENAI_API_KEY`    | —                        | Key for the OpenAI-compatible endpoint               |
 | `OPENAI_MODELS`     | —                        | Comma-separated model ids to show in the picker      |
 | `OPENAI_CONTEXT_LENGTH` | —                    | Context window (tokens) of the OpenAI-compatible models, for the chat pane's context meter — the server can't discover it |
+| `OPENAI_VISION_MODELS` | —                     | Comma-separated OpenAI-compatible model ids that accept images — `view_pdf`'s rendered pages are attached for them (not discoverable from the endpoint, so opt in per model) |
 | `ANTHROPIC_API_KEY` | —                        | Enables the Anthropic provider                       |
 | `ANTHROPIC_MODELS`  | `claude-opus-4-8,claude-sonnet-5` | Anthropic models to show                    |
 | `PYTHON_BIN`        | `server/.venv/bin/python` | Interpreter for `run_python`/`view_pdf`/`ats_check` |
@@ -105,9 +107,12 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - `run_python(code)` — runs Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build dir, mainly to generate figures you then `\includegraphics`. The agent compiles in the **same session directory as your preview**, so a generated figure still resolves after you accept the edit. Generated files appear in the editor's file tree (purple dot); click one to preview it.
 - `render_mermaid(code, filename?)` — renders a Mermaid diagram (flowchart, sequence, class, state, ER, gantt, pie, mindmap, …) to a print-quality PNG in the build dir, for conceptual/structural figures that would be awkward to draw in matplotlib.
 - **Data import**: the *"+ Add data file"* button under the file tree uploads a CSV/Excel/image into the compile session — the agent can then `pd.read_csv`/`pd.read_excel` it in `run_python` and plot it with seaborn.
-- `view_pdf()` — compiles and **inspects the PDF's actual layout**, returning a text report the model can act on: page count/paper size, per-page text coverage and margins, content clipped at page edges, Overfull `\hbox` lines with `main.tex` line numbers, near-empty trailing pages, and font usage. This is how text-only local models "see" the result; vision-capable models additionally get the rendered page images.
+- `view_pdf(max_pages?)` — compiles and **inspects the PDF's actual layout**: a text report the model can act on (page count/paper size, per-page text coverage and margins, content clipped at page edges, Overfull `\hbox` lines with `main.tex` line numbers, near-empty trailing pages, font usage), and — for **vision-capable models** — the **rendered page images themselves**, attached right after the call so the model literally looks at the document (layout, figures, colors, typography) instead of inferring it. Up to 20 pages per look (it asks for the deck's full page count when reviewing slides). The loop is **iterative**: if the model edits after looking and doesn't re-check, the server re-renders and shows it the updated pages until the fix actually looks right (2 extra looks max per turn). Vision is detected automatically for Ollama models and always on for Anthropic; for OpenAI-compatible endpoints, list your multimodal models in `OPENAI_VISION_MODELS`. Text-only models keep the report-only behavior. Generated figures get the same treatment: `run_python` plots and `render_mermaid` diagrams are attached as images the moment they're produced, so a vision model verifies its own figures (labels, legends, nothing cut off) and regenerates if needed.
 - `ats_check(job_description?)` — extracts the compiled PDF's text and reports ATS parseability, contact/section coverage, and keyword match against a posting.
 - `check_bibtex(verify_online?)` — verifies the bibliography, no compile needed. Locally: every `\cite`-style key must resolve to a `.bib` entry or `\bibitem`, unused entries and missing `\bibliography` targets are flagged, each problem quoted at its source line. Online (the interesting part): every **cited** entry is checked against **Crossref** (does the DOI exist, and does it resolve to the *claimed* paper?), **arXiv** ids, and a Crossref title search — catching **hallucinated references**, the fake-but-plausible papers and DOIs LLMs love to invent. Verdicts are conservative: a network failure reports as "could not check", never as fabricated. Type `/check-bibtex` in the chat to run the whole workflow; like compiles, the bibliography is **re-checked at the end of the turn** if the agent edited files after checking, so fixes can't go unverified.
+
+- `find_references(query, max_results?)` — the constructive counterpart to `check_bibtex`: searches **Crossref and arXiv** for real papers matching a topic, claim, or half-remembered title, and returns candidates **with ready-to-insert BibTeX** built verbatim from the records (existing bibliography entries are recognized and reused; generated keys never collide). The agent is forbidden from writing `.bib` entries from memory — memory invents papers; this tool can only cite ones that exist.
+- `ask_user(question, options)` — presents a question with 2–5 **clickable answer choices** in the chat (plus an "Other…" free-text escape). Your click is sent as the next message, so the agent can ask "which file is the resume?" or "apply the plan?" without you typing.
 
 Only `edit_document` changes your document, and every edit is yours to accept or reject.
 
@@ -117,8 +122,11 @@ Type `/` in the chat composer for an autocomplete menu of built-in workflows:
 
 - **`/apply <job-url>`** (or `/apply` + a pasted job description) — tailor your resume to a specific posting. The agent fetches the posting, reads your resume, and scores it with `ats_check` against the job description; then it replies with the role's key requirements, a strengths/gaps review, and a **numbered improvement plan** — *without touching your document*. Reply to approve the plan (or change it), and only then does the agent edit, recompile, and re-run `ats_check` to confirm the keyword coverage actually improved. It will never invent experience or skills to match the posting; if a posting is behind a login wall (LinkedIn often is), it asks you to paste the text instead of guessing. Works best with a mid-size model or better — very small local models can struggle to hold the plan-first discipline.
 - **`/check-bibtex`** — verify your references, including that the cited papers actually exist (see `check_bibtex` above).
+- **`/find-refs <topic or claim>`** — find real papers to cite. The agent searches Crossref/arXiv with `find_references`, shows you the candidates (title, authors, year, venue), and inserts the best match's BibTeX **exactly as the databases returned it** plus the `\cite` — as accept/reject diffs, so you can reject and pick another candidate. If nothing genuinely matches, it says so rather than inserting a poor fit.
+- **`/review`** — proofread the project: spelling, grammar, clarity, inconsistent terminology/notation, undefined acronyms, tense shifts, and LaTeX-level nits. Replies with an assessment and a **numbered findings list** quoting the exact text at each location; tell it which numbers to apply (or "all") and it edits, recompiles, and summarizes. It never changes technical meaning while rewording.
+- **`/check-submission <venue / rules>`** — check the document against a venue's submission requirements (e.g. `/check-submission NeurIPS 2026, 9 pages excl. refs, anonymized`; name just the venue and it looks up the author guidelines). It reads the **real layout** via `view_pdf` — page count, margins, fonts, overfull lines — and hunts the source for anonymization leaks (authors, emails, acknowledgements, "our previous work"). Replies with a pass/fail checklist and a numbered fix plan; edits only after you approve, then re-verifies.
 
-The chat bubble shows the command you typed; the agent receives the full workflow instruction behind it.
+The chat bubble shows the command you typed; the agent receives the full workflow instruction behind it. The plan-first commands (`/review`, `/check-submission`, `/apply`) typically end their first turn with clickable **approve / change** choices via `ask_user`.
 
 So a typical turn is: **edit → compile_check → (if it fails) read the log, fix, compile_check again → summarize.** This means the changes it proposes are **verified to compile** before you ever see them. When the turn ends you get a green *"✓ Verified — the document compiles with these changes"* banner (or a red one with the log if it couldn't).
 
@@ -129,6 +137,23 @@ You stay in control:
 3. If an `old_string` doesn't match uniquely, the card shows why (not found / matches multiple places) instead of applying a wrong edit.
 
 The loop is built to survive **small local models** that fumble tool calling. If the model writes its tool call as plain text instead of a native call — bare `{"name": …, "arguments": {…}}` JSON, `<tool_call>` tags, fenced ` ```json ` blocks, or `tool_name({…})` pseudo-code — the server recovers it, executes it for real, feeds the result back, and continues the loop. `<think>…</think>` reasoning from thinking models is stripped from the chat. Repeated identical edits are rejected so the model can't apply the same insertion twice. Models that can't produce tool calls in any form still fall back to emitting ` ```latex-edit ` blocks — you get diff cards, but without the agent's self-verification.
+
+### Skills (bring your own commands)
+
+The built-in commands above are baked in — **skills** are the same idea, but yours. Drop a folder containing a `SKILL.md` into `~/.latentdraft/skills/` (available in every project) or `<project>/.latentdraft/skills/` (just that project) and it becomes **both** a `/slash` command in the composer **and** a skill the agent loads on its own (via its `skill` tool) when your request matches the description. The format is the Agent Skills convention used by Claude Code — skills written for Claude Code load unchanged, since unknown frontmatter keys (`allowed-tools`, `metadata`, …) are simply ignored:
+
+```markdown
+---
+name: thank-reviewers
+description: Draft a polite point-by-point response letter to the paper's reviewers
+---
+
+Read every .tex file in the project first. Then draft the response letter as
+sections/rebuttal.tex: quote each reviewer point, answer it, and reference the
+change made in the paper. Keep the tone appreciative and concrete…
+```
+
+`description` is required — it is the autocomplete blurb *and* what the model matches your request against, so write it like a trigger ("Use when…"). `name` is optional; the folder name is used otherwise (normalized to lowercase-and-dashes). A project skill shadows a global skill of the same name, and built-in commands always win over skills. Skills are re-read at the start of every agent turn, so editing a `SKILL.md` takes effect on your next message — no restart.
 
 ## Project layout
 
@@ -142,7 +167,8 @@ bin/      tectonic binary, fetched by npm run setup (gitignored)
 
 ## Notes & limits
 
-- The editor's file tabs (`main.tex`, `refs.bib`, `sections/…`) are all sent along on every compile, so `\input` and `\bibliography` resolve — for both the live preview and the agent's `compile_check` sandbox. The agent reads and edits **any project file**, and the file tree supports creating, renaming, and deleting files.
+- The editor's file tabs (`main.tex`, `refs.bib`, `sections/…`) are all sent along on every compile, so `\input` and `\bibliography` resolve — for both the live preview and the agent's `compile_check` sandbox. The agent reads and edits **any project file**.
+- The file tree works like VS Code's: create files of **any text type** (`.tex`, `.py`, `.md`, `.yml`, `.json`, `.sh`, …) or **folders** (including empty ones) via inline naming — `/` in the name nests; folders collapse/expand on click and can be renamed or deleted (with contents) from their hover actions. Python, Markdown, YAML, JSON, and shell buffers get syntax highlighting; `.tex` additionally keeps LaTeX autocomplete, compile squiggles, and SyncTeX.
 - Stale compile dirs under `server/tmp/` are deleted automatically after 24h (on server start).
 - The document is sent to the model on each chat turn; very large documents may exceed a local model's context window.
 
