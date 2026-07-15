@@ -1,7 +1,7 @@
 {
   "name": "latentdraft",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Cursor-style LaTeX editor: raw editor, live PDF preview, and an AI agent that proposes edits.",
   "license": "AGPL-3.0-only",
   "author": "tchauffi",
