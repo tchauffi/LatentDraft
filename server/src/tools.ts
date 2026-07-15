@@ -100,6 +100,9 @@ export interface AgentToolsOptions {
   /** User-authored SKILL.md instruction packs; when non-empty, the model gets a
    * `skill` tool to load one and the system prompt lists them. */
   skills?: Skill[];
+  /** True when the selected model accepts image parts: view_pdf renders at a
+   * readable dpi and announces that the pages will be attached for viewing. */
+  vision?: boolean;
   /** Injectable fetch for fetch_url — tests stay offline. */
   fetchFn?: typeof fetch;
 }
@@ -603,17 +606,29 @@ export function createAgentTools(opts: AgentToolsOptions) {
       } catch (err) {
         report = `(layout analysis failed: ${String(err)})`;
       }
+      let rendered = 0;
       try {
         const prefix = projectDir
           ? path.join(projectDir, ".latentdraft", "preview")
           : path.join(sessionDir(opts.compileSessionId), "preview");
-        const pages = await renderPdf(compiled.pdf, prefix, max_pages ?? 3);
+        // Vision models READ the pages, not just measure them — render sharper.
+        const pages = await renderPdf(compiled.pdf, prefix, max_pages ?? 3, opts.vision ? 150 : 110);
         state.renderedImages = pages.map((p) => p.base64);
-        emitTool({ name: "view_pdf", summary: `Inspected layout (${pages.length} page(s) rendered)`, ok: true });
+        rendered = pages.length;
+        emitTool({
+          name: "view_pdf",
+          summary: `Inspected layout (${pages.length} page(s) rendered${opts.vision ? " — pages attached" : ""})`,
+          ok: true,
+        });
       } catch {
         emitTool({ name: "view_pdf", summary: "Inspected layout (render failed)", ok: true });
       }
-      return `Compiled successfully. Layout report:\n${report}`;
+      const visionNote =
+        opts.vision && rendered > 0
+          ? "\n\nThe rendered page images are attached in the next message — inspect them " +
+            "before deciding the layout is fine."
+          : "";
+      return `Compiled successfully. Layout report:\n${report}${visionNote}`;
     },
   });
 

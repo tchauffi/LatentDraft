@@ -72,6 +72,12 @@ const EMPTY_ROUND_NUDGE =
   "create_file / compile_check). When the task is done and the document compiles, reply " +
   "with a short plain-text summary.";
 const MAX_EMPTY_ROUND_NUDGES = 2;
+// Sent WITH the rendered pages after a native view_pdf, so a vision model can
+// actually look at the document instead of trusting the text report alone.
+const VISION_RESULTS_NOTE =
+  "Here are the rendered pages from your view_pdf call — inspect them. If the layout, " +
+  "figures, and typography look right, continue (or wrap up); if not, fix what you see " +
+  "and verify again.";
 const RECOVERY_CONTINUE_NOTE =
   "(The current document is in the system prompt.) Continue the task — do not repeat " +
   "or summarize these results. Prefer native tool calls; if you must write one as text, " +
@@ -154,6 +160,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
     compileSessionId,
     projectDir,
     skills,
+    vision: visionOk,
     emitEdit: (e) =>
       write({
         type: "edit",
@@ -230,7 +237,7 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       const filter = new ToolCallStreamFilter(
         knownToolNames,
         (text) => write({ type: "text", text }),
-        [RECOVERY_CONTINUE_NOTE, RECOVERY_RESULTS_HEADER, EMPTY_ROUND_NUDGE],
+        [RECOVERY_CONTINUE_NOTE, RECOVERY_RESULTS_HEADER, EMPTY_ROUND_NUDGE, VISION_RESULTS_NOTE],
       );
       const stream = await agent.stream(messages as Parameters<typeof agent.stream>[0], {
         instructions: system,
@@ -311,6 +318,27 @@ export async function streamChat(res: Response, body: ChatRequest): Promise<void
       // are blocked — end the turn so the user can actually answer.
       if (calls.length === 0 && agentTools.hasAsked()) return;
       if (calls.length === 0) {
+        // A native view_pdf left rendered pages: a vision model gets them as
+        // image parts in a follow-up user message (Ollama accepts images ONLY
+        // there, never in tool results) and one more round to actually look.
+        // takeRenderedImages() clears on read, so this can't repeat itself.
+        if (visionOk && round < MAX_RECOVERY_ROUNDS) {
+          const pages = agentTools.takeRenderedImages();
+          if (pages.length > 0) {
+            convo = [
+              ...convo,
+              ...(text.trim() ? [{ role: "assistant" as const, content: text.trim() }] : []),
+              {
+                role: "user",
+                content: [
+                  { type: "text" as const, text: VISION_RESULTS_NOTE },
+                  ...pages.map((data) => ({ type: "image" as const, image: data })),
+                ],
+              },
+            ];
+            continue;
+          }
+        }
         // Silent stall: nothing visible and nothing recovered. Nudge the model
         // to act on its (hidden) plan instead of ending the turn on nothing.
         if (

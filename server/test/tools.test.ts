@@ -574,3 +574,31 @@ test("buildSystemPrompt lists skills only when some are installed", () => {
   assert.match(withSkills, /call skill\(\{name\}\) FIRST/);
   assert.doesNotMatch(buildSystemPrompt("DOC"), /Installed skills/);
 });
+
+test("view_pdf attaches pages for vision models and says so", async () => {
+  const doc = "\\documentclass{article}\\begin{document}vision test\\end{document}";
+  const events: { name: string; summary: string; ok: boolean }[] = [];
+  const withVision = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-vision-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+    emitTool: (e) => events.push(e),
+    vision: true,
+  });
+  const seen = String(await exec(withVision.tools.view_pdf, {}));
+  assert.match(seen, /attached in the next message/);
+  assert.match(events.at(-1)!.summary, /pages attached/);
+  const pages = withVision.takeRenderedImages();
+  assert.ok(pages.length > 0, "rendered pages are available for the feedback message");
+  assert.equal(withVision.takeRenderedImages().length, 0, "takeRenderedImages clears on read");
+
+  const textOnly = createAgentTools({
+    initialDoc: doc,
+    compileSessionId: "tools-novision-test",
+    emitEdit: () => {},
+    emitCheck: () => {},
+  });
+  const plain = String(await exec(textOnly.tools.view_pdf, {}));
+  assert.doesNotMatch(plain, /attached in the next message/);
+});
