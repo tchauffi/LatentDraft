@@ -433,6 +433,12 @@ export async function writeProjectFile(
   return { ok: true, mtimeMs: st.mtimeMs };
 }
 
+/**
+ * Rename or move a file or directory within a project. Also the move
+ * primitive behind drag-and-drop in the file tree, which is why the checks
+ * below matter: `fs.rename` would happily replace an existing destination and
+ * report success, and a dragged folder can be dropped onto its own descendant.
+ */
 export async function renameProjectFile(
   id: string,
   from: string,
@@ -442,8 +448,27 @@ export async function renameProjectFile(
   const fromNorm = from && safeProjectFilePath(from);
   const toNorm = to && safeProjectFilePath(to);
   if (!dir || !fromNorm || !toNorm) return { ok: false, error: "Invalid project or path." };
+  if (fromNorm === toNorm) return { ok: true }; // no-op drop on the current parent
+  if (fromNorm === "main.tex") {
+    return { ok: false, error: "main.tex is the compile target — it cannot be moved or renamed." };
+  }
+  // Moving a folder inside itself would bury it (or fail with a bare EINVAL).
+  if (toNorm.startsWith(`${fromNorm}/`)) {
+    return { ok: false, error: `Cannot move ${fromNorm} into itself.` };
+  }
+  const targetTo = path.join(dir, toNorm);
+  const targetFrom = path.join(dir, fromNorm);
   try {
-    const targetTo = path.join(dir, toNorm);
+    const [dest, src] = await Promise.all([stat(targetTo), stat(targetFrom)]);
+    // On case-insensitive filesystems `notes.tex` -> `Notes.tex` stats the
+    // SAME file; that is a legitimate rename, not a collision.
+    if (dest.ino !== src.ino || dest.dev !== src.dev) {
+      return { ok: false, error: `${toNorm} already exists.` };
+    }
+  } catch {
+    /* destination free (or source already gone — rename reports that) */
+  }
+  try {
     await mkdir(path.dirname(targetTo), { recursive: true });
     await rename(path.join(dir, fromNorm), targetTo);
     return { ok: true };

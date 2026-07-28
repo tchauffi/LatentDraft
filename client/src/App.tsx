@@ -28,6 +28,8 @@ import {
   type ProposedEdit,
 } from "./lib/api";
 import { applyEdit as applyEditToDoc, type ApplyResult } from "./lib/diff";
+import { moveTarget } from "./lib/fileTree";
+import type { UploadFile } from "./panes/EditorPane";
 
 const MAIN = "main.tex";
 const DEBOUNCE_MS = 800;
@@ -418,14 +420,27 @@ export default function App() {
     [],
   );
 
-  /** Upload a file (data, image, bib) straight into the project. */
-  const uploadFile = useCallback(
-    async (file: File): Promise<string | null> => {
+  /**
+   * Upload files (data, images, .bib) into the project — from the picker or
+   * dropped from the desktop. `destDir` is the folder they land in ("" = the
+   * project root); a dropped folder arrives as files carrying their relative
+   * subpath, which is preserved under the destination.
+   */
+  const uploadFiles = useCallback(
+    async (files: UploadFile[], destDir = ""): Promise<string | null> => {
       const id = projectRef.current;
       if (!id) return "No project open.";
-      const res = await saveProjectFile(id, file.name, file);
-      if (!res.ok) return "error" in res ? res.error : "Upload failed.";
+      const dir = destDir.replace(/^\/+|\/+$/g, "");
+      const failures: string[] = [];
+      for (const { file, path: rel } of files) {
+        const name = (rel ?? file.name).replace(/^\/+/, "");
+        const res = await saveProjectFile(id, dir ? `${dir}/${name}` : name, file);
+        if (!res.ok) failures.push(`${name}: ${"error" in res ? res.error : "upload failed"}`);
+      }
       await refreshProjectFiles();
+      // One failure names itself; several are summarised so the strip stays readable.
+      if (failures.length === 1) return failures[0];
+      if (failures.length > 1) return `${failures.length} of ${files.length} files failed to upload.`;
       return null;
     },
     [refreshProjectFiles],
@@ -469,6 +484,29 @@ export default function App() {
     [openFile, refreshProjectFiles],
   );
 
+  /**
+   * The server has already moved `from` to `to` — bring every piece of
+   * client state keyed by path along with it (buffers, mtimes, dirty set,
+   * open tabs, the active file, and for a folder the directory list). Shared
+   * by rename and by drag-and-drop, which are the same operation on disk.
+   */
+  const applyPathChange = useCallback((from: string, to: string, kind: "file" | "dir") => {
+    const prefix = `${from}/`;
+    const move =
+      kind === "file"
+        ? (p: string) => (p === from ? to : p)
+        : (p: string) => (p === from ? to : p.startsWith(prefix) ? `${to}/${p.slice(prefix.length)}` : p);
+    setFiles((f) => Object.fromEntries(Object.entries(f).map(([p, content]) => [move(p), content])));
+    mtimes.current = Object.fromEntries(
+      Object.entries(mtimes.current).map(([p, mt]) => [move(p), mt]),
+    );
+    dirty.current = new Set([...dirty.current].map(move));
+    setOpenTabs((tabs) => tabs.map(move));
+    setActive(move);
+    if (kind === "dir") setProjectDirs((dirs) => dirs.map(move).sort());
+    void refreshProjectFiles();
+  }, [refreshProjectFiles]);
+
   const renameFile = useCallback(
     async (path: string) => {
       const id = projectRef.current;
@@ -485,18 +523,34 @@ export default function App() {
         window.alert(r.error ?? "Rename failed.");
         return;
       }
-      setFiles((f) => {
-        const { [path]: content, ...rest } = f;
-        return content !== undefined ? { ...rest, [to]: content } : rest;
-      });
-      mtimes.current[to] = Date.now();
-      delete mtimes.current[path];
-      dirty.current.delete(path);
-      setOpenTabs((tabs) => tabs.map((t) => (t === path ? to : t)));
-      setActive((a) => (a === path ? to : a));
-      void refreshProjectFiles();
+      applyPathChange(path, to, "file");
     },
-    [saveDirty, refreshProjectFiles],
+    [saveDirty, applyPathChange],
+  );
+
+  /**
+   * Drag-and-drop move: `from` (file or folder) into the folder `toDir`
+   * ("" = project root). The destination and the illegal cases are decided by
+   * moveTarget; the server re-checks and owns collisions.
+   */
+  const moveEntry = useCallback(
+    async (from: string, toDir: string) => {
+      const id = projectRef.current;
+      if (!id) return;
+      const target = moveTarget(from, toDir);
+      if (!target.ok) {
+        if (target.reason) window.alert(target.reason);
+        return;
+      }
+      await saveDirty(); // move what's on disk, not a stale copy
+      const r = await renameProjectFileApi(id, from, target.to);
+      if (!r.ok) {
+        window.alert(r.error ?? "Move failed.");
+        return;
+      }
+      applyPathChange(from, target.to, projectDirs.includes(from) ? "dir" : "file");
+    },
+    [saveDirty, applyPathChange, projectDirs],
   );
 
   const deleteFile = useCallback(
@@ -535,21 +589,9 @@ export default function App() {
         window.alert(r.error ?? "Rename failed.");
         return;
       }
-      const prefix = `${path}/`;
-      const move = (p: string) => (p.startsWith(prefix) ? `${to}/${p.slice(prefix.length)}` : p);
-      setFiles((f) =>
-        Object.fromEntries(Object.entries(f).map(([p, content]) => [move(p), content])),
-      );
-      mtimes.current = Object.fromEntries(
-        Object.entries(mtimes.current).map(([p, mt]) => [move(p), mt]),
-      );
-      dirty.current = new Set([...dirty.current].map(move));
-      setOpenTabs((tabs) => tabs.map(move));
-      setActive(move);
-      setProjectDirs((dirs) => dirs.map((d) => (d === path ? to : move(d))).sort());
-      void refreshProjectFiles();
+      applyPathChange(path, to, "dir");
     },
-    [saveDirty, refreshProjectFiles],
+    [saveDirty, applyPathChange],
   );
 
   /** Delete a folder and everything in it. */
@@ -682,7 +724,8 @@ export default function App() {
                 onCloseTab={closeTab}
                 generatedFiles={binaryFiles}
                 fileUrl={fileUrl}
-                onUpload={uploadFile}
+                onUpload={uploadFiles}
+                onMoveEntry={(from, toDir) => void moveEntry(from, toDir)}
                 onCreateEntry={createEntry}
                 onRenameFile={(f) => void renameFile(f)}
                 onDeleteFile={(f) => void deleteFile(f)}

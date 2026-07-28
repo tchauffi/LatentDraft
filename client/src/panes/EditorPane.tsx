@@ -13,7 +13,7 @@ import { latexLight } from "../lib/editorTheme";
 import type { Extension } from "@codemirror/state";
 import { inlineSuggestions, type SuggestionCallbacks } from "../lib/inlineSuggest";
 import { latexAutocomplete } from "../lib/latexComplete";
-import { buildFileTree, isImageFile, type FileNode } from "../lib/fileTree";
+import { buildFileTree, isImageFile, moveTarget, parentOf, type FileNode } from "../lib/fileTree";
 import type { CompileDiagnostic, ProposedEdit } from "../lib/api";
 
 const latex = StreamLanguage.define(stex);
@@ -38,6 +38,51 @@ function languageFor(file: string): Extension | undefined {
   }
 }
 
+/** A file to upload, with the project-relative path it should land under.
+ * `path` differs from `file.name` only for files inside a dropped folder. */
+export interface UploadFile {
+  file: File;
+  path?: string;
+}
+
+/** Identifies an internal tree drag, so drops from other apps are ignored. */
+const DRAG_MIME = "application/x-latentdraft-path";
+
+/**
+ * Collect the dropped items as uploadable files. A dropped folder is walked
+ * recursively (webkitGetAsEntry), so its structure is preserved rather than
+ * flattened; browsers without the API fall back to the flat file list.
+ */
+async function filesFromDrop(dt: DataTransfer): Promise<UploadFile[]> {
+  const entries = [...dt.items]
+    .filter((i) => i.kind === "file")
+    .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null));
+  if (entries.length === 0 || entries.every((e) => !e)) {
+    return [...dt.files].map((file) => ({ file }));
+  }
+  const out: UploadFile[] = [];
+  const walk = async (entry: FileSystemEntry, prefix: string): Promise<void> => {
+    if (entry.isFile) {
+      const file = await new Promise<File | null>((resolve) =>
+        (entry as FileSystemFileEntry).file(resolve, () => resolve(null)),
+      );
+      if (file) out.push({ file, path: prefix + file.name });
+      return;
+    }
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    // readEntries returns at most ~100 per call — keep reading until it's dry.
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve) =>
+        reader.readEntries(resolve, () => resolve([])),
+      );
+      if (batch.length === 0) break;
+      for (const child of batch) await walk(child, `${prefix}${entry.name}/`);
+    }
+  };
+  for (const entry of entries) if (entry) await walk(entry, "");
+  return out;
+}
+
 interface Props {
   value: string;
   onChange: (value: string) => void;
@@ -56,8 +101,10 @@ interface Props {
   generatedFiles?: string[];
   /** URL serving a session file's content, for previews of generated files. */
   fileUrl?: (name: string) => string;
-  /** Upload a data file into the project; resolves to an error message or null. */
-  onUpload?: (file: File) => Promise<string | null>;
+  /** Upload data files into `destDir` ("" = root); resolves to an error or null. */
+  onUpload?: (files: UploadFile[], destDir?: string) => Promise<string | null>;
+  /** Move a file or folder into another folder ("" = root), by drag-and-drop. */
+  onMoveEntry?: (from: string, toDir: string) => void;
   /** Create a file or folder (inline input row); resolves to an error or null. */
   onCreateEntry?: (path: string, kind: "file" | "dir") => Promise<string | null>;
   /** Project file operations (shown as actions above the tree). */
@@ -115,6 +162,54 @@ function Chevron({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+/** Drag-and-drop wiring shared by every row and by the tree background. */
+interface DragOps {
+  /** The entry being dragged, for styling only — `beginDrag` records the
+   * authoritative copy synchronously, since dragover can fire before React
+   * has re-rendered and a stale value would accept an illegal drop. */
+  dragging: string | null;
+  beginDrag: (path: string) => void;
+  endDrag: () => void;
+  /** Folder highlighted as the drop target ("" = the tree root). */
+  dropDir: string | null;
+  setDropDir: (dir: string | null) => void;
+  /** Whether a drop onto this folder is currently allowed. */
+  canDrop: (toDir: string, internal: boolean) => boolean;
+  /** Perform the drop: an internal move, or an upload of dropped OS files. */
+  onDrop: (e: React.DragEvent, toDir: string) => void;
+}
+
+/** Whether a drag carries one of our tree rows. `types` is the only part of
+ * the DataTransfer readable during dragover — getData is blocked until drop. */
+function isInternalDrag(dt: DataTransfer): boolean {
+  return [...dt.types].includes(DRAG_MIME);
+}
+
+/** Handlers for anything that accepts a drop into `dir` ("" = root). */
+function dropProps(ops: DragOps, dir: string) {
+  return {
+    onDragOver: (e: React.DragEvent) => {
+      const internal = isInternalDrag(e.dataTransfer);
+      if (!ops.canDrop(dir, internal)) return;
+      e.preventDefault(); // required, or the browser refuses the drop
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = internal ? "move" : "copy";
+      ops.setDropDir(dir);
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      // Ignore the leave events fired while crossing this row's own children.
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+      if (ops.dropDir === dir) ops.setDropDir(null);
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!ops.canDrop(dir, isInternalDrag(e.dataTransfer))) return;
+      e.preventDefault();
+      e.stopPropagation();
+      ops.onDrop(e, dir);
+    },
+  };
+}
+
 function TreeLevel({
   nodes,
   active,
@@ -125,6 +220,7 @@ function TreeLevel({
   onToggleDir,
   onRenameDir,
   onDeleteDir,
+  drag,
 }: {
   nodes: FileNode[];
   active: string;
@@ -135,15 +231,36 @@ function TreeLevel({
   onToggleDir: (path: string) => void;
   onRenameDir?: (path: string) => void;
   onDeleteDir?: (path: string) => void;
+  drag?: DragOps;
 }) {
+  /** Rows are draggable only for real project files — generated (server-side)
+   * files and main.tex have nowhere to move to. */
+  const dragProps = (node: FileNode) =>
+    !drag || node.generated || node.path === "main.tex"
+      ? {}
+      : {
+          draggable: true,
+          onDragStart: (e: React.DragEvent) => {
+            e.stopPropagation();
+            e.dataTransfer.setData(DRAG_MIME, node.path);
+            e.dataTransfer.effectAllowed = "move";
+            drag.beginDrag(node.path);
+          },
+          onDragEnd: () => drag.endDrag(),
+        };
+
   return (
     <ul className="filetree-level">
       {nodes.map((node) =>
         node.children ? (
           <li key={node.path}>
             <div
-              className="filetree-row filetree-dir"
+              className={`filetree-row filetree-dir${
+                drag?.dropDir === node.path ? " filetree-droptarget" : ""
+              }${drag?.dragging === node.path ? " filetree-dragging" : ""}`}
               onClick={() => onToggleDir(node.path)}
+              {...dragProps(node)}
+              {...(drag ? dropProps(drag, node.path) : {})}
             >
               <Chevron collapsed={collapsed.has(node.path)} />
               <FolderIcon />
@@ -186,6 +303,7 @@ function TreeLevel({
                 onToggleDir={onToggleDir}
                 onRenameDir={onRenameDir}
                 onDeleteDir={onDeleteDir}
+                drag={drag}
               />
             )}
           </li>
@@ -194,8 +312,10 @@ function TreeLevel({
             <div
               className={`filetree-row${
                 node.path === (preview ?? active) ? " filetree-active" : ""
-              }`}
+              }${drag?.dragging === node.path ? " filetree-dragging" : ""}`}
               onClick={() => onPick(node)}
+              {...dragProps(node)}
+              {...(drag ? dropProps(drag, parentOf(node.path)) : {})}
             >
               <FileIcon active={node.path === (preview ?? active)} />
               <span className="filetree-name">{node.name}</span>
@@ -226,6 +346,7 @@ export default function EditorPane({
   generatedFiles,
   fileUrl,
   onUpload,
+  onMoveEntry,
   onCreateEntry,
   onRenameFile,
   onDeleteFile,
@@ -328,6 +449,60 @@ export default function EditorPane({
       createBusyRef.current = false;
     }
   };
+  // ---- Drag and drop: reorganise the tree, or drop files in from the desktop.
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dropDir, setDropDir] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  // dragover can fire in the same tick as dragstart, before React re-renders,
+  // so the drag source lives in a ref and `dragging` is only for the styling.
+  const draggingRef = useRef<string | null>(null);
+
+  const drag = useMemo<DragOps>(() => {
+    const canDrop = (toDir: string, internal: boolean) => {
+      if (internal) {
+        const from = draggingRef.current;
+        return from !== null && onMoveEntry !== undefined && moveTarget(from, toDir).ok;
+      }
+      return onUpload !== undefined; // an external drag — anything can be uploaded
+    };
+    const endDrag = () => {
+      draggingRef.current = null;
+      setDragging(null);
+      setDropDir(null);
+    };
+    return {
+      dragging,
+      beginDrag: (path) => {
+        draggingRef.current = path;
+        setDragging(path);
+      },
+      endDrag,
+      dropDir,
+      setDropDir,
+      canDrop,
+      onDrop: (e, toDir) => {
+        setDropDir(null);
+        const moved = e.dataTransfer.getData(DRAG_MIME);
+        if (moved) {
+          endDrag();
+          onMoveEntry?.(moved, toDir);
+          return;
+        }
+        if (!onUpload) return;
+        void (async () => {
+          const dropped = await filesFromDrop(e.dataTransfer);
+          if (dropped.length === 0) return;
+          setUploading(true);
+          try {
+            setUploadError(await onUpload(dropped, toDir));
+          } finally {
+            setUploading(false);
+          }
+        })();
+      },
+    };
+  }, [dragging, dropDir, onMoveEntry, onUpload]);
+
   // A previewed file can disappear (e.g. new browser session dir) — fall back.
   const previewGone = preview && !(generatedFiles ?? []).includes(preview.path);
   const activePreview = preview && !previewGone ? preview : null;
@@ -437,7 +612,12 @@ export default function EditorPane({
       </div>
       <div className="editor-main">
         {showTree && (
-          <div className="filetree">
+          // The tree itself is the root drop target: files dropped on the
+          // background land at the project root, folder rows take precedence.
+          <div
+            className={`filetree${dropDir === "" ? " filetree-droproot" : ""}`}
+            {...dropProps(drag, "")}
+          >
             {onCreateEntry && (
               <div className="filetree-actions">
                 <span className="filetree-actions-label">FILES</span>
@@ -518,26 +698,34 @@ export default function EditorPane({
               onToggleDir={toggleDir}
               onRenameDir={onRenameDir}
               onDeleteDir={onDeleteDir}
+              drag={drag}
             />
             {onUpload && (
               <div className="filetree-upload">
                 <button
                   className="filetree-upload-btn"
-                  title="Add a data file (CSV, Excel, image, …) for the agent to use"
+                  title="Add data files (CSV, Excel, image, …) — or drag them in from your desktop"
                   onClick={() => uploadInputRef.current?.click()}
+                  disabled={uploading}
                 >
-                  + Add data file
+                  {uploading ? "Uploading…" : "+ Add data files"}
                 </button>
                 <input
                   ref={uploadInputRef}
                   type="file"
+                  multiple
                   accept=".csv,.tsv,.xlsx,.xls,.json,.txt,.dat,.png,.jpg,.jpeg,.svg,.pdf,.bib,.py,.md,.yml,.yaml"
                   style={{ display: "none" }}
                   onChange={async (e) => {
-                    const f = e.target.files?.[0];
+                    const picked = [...(e.target.files ?? [])].map((file) => ({ file }));
                     e.target.value = ""; // allow re-uploading the same name
-                    if (!f) return;
-                    setUploadError(await onUpload(f));
+                    if (picked.length === 0) return;
+                    setUploading(true);
+                    try {
+                      setUploadError(await onUpload(picked));
+                    } finally {
+                      setUploading(false);
+                    }
                   }}
                 />
                 {uploadError && <div className="filetree-upload-err">{uploadError}</div>}
