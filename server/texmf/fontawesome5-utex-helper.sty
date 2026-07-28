@@ -1,0 +1,15 @@
+% LatentDraft compatibility shim — original code, not derived from fontawesome5.
+%
+% fontawesome5.sty picks a helper based on \c_sys_engine_str, and reaches for
+% this one on XeTeX/LuaTeX. Upstream's version walks EVERY glyph of the OTF via
+% \XeTeXglyphname to auto-generate the \faXxx commands, and that loop aborts
+% Tectonic's XeTeX engine outright ("free(): invalid pointer" — no PDF, no
+% LaTeX error to fix). This file is put on Tectonic's search path (see
+% server/src/compile.ts) so it shadows the bundle's copy and redirects to
+% fontawesome5-generic-helper instead: the engine-agnostic Type1 path, which
+% renders the same Font Awesome 5 Free icon set under the same command names
+% with no OTF and no glyph introspection.
+%
+% Only documents that load fontawesome5 ever read this file.
+\ProvidesExplPackage{fontawesome5-utex-helper}{2026/07/28}{5.15.3}{LatentDraft: route fontawesome5 through the Type1 helper}
+\RequirePackage{fontawesome5-generic-helper}

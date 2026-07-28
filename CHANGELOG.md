@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fontawesome5` works.** It used to abort the engine outright — `free(): invalid pointer`, no PDF and no LaTeX error to fix — because its XeTeX helper walks every glyph of the OTF via `\XeTeXglyphname` at load time, so the CV template, the autocomplete list and the agent's instructions all steered people to the v4 `fontawesome` package instead. A shim in `server/texmf` (put on the engine's search path with `-Z search-path`) now routes the package through its Type1 path: the same 1377 `\faXxx` commands, plus `\faIcon{name}` and the style option (`\faStar[regular]`), with no change to your source and nothing else in the document perturbed. fontawesome5 is now what the `cv` template loads and what the agent reaches for; `\usepackage{fontawesome}` (v4) keeps working. Font Awesome 5 **Free** only — `[pro]` needs fonts Tectonic's bundle doesn't ship. The flag is probed once against the actual binary, so an older `TECTONIC_BIN` degrades to a startup warning instead of breaking every compile.
+
+### Changed
+
+- `ats_check` decides the icon-font warning from the source rather than the extracted text. fontawesome5's Type1 glyphs come out as ordinary-looking characters instead of private-use codepoints, so the old check would have gone quiet exactly when the default CV template started using them.
+
 - **Drag and drop in the file tree.** Drop files — or a whole folder, whose structure is preserved — from your desktop anywhere on the tree to add them to the project: onto a folder row to land inside it, onto the background for the project root. Dragging rows within the tree reorganises the project, so a figure or a section finally moves into a folder without a rename dialog and a retyped path. Dropping onto a *file* means "into the folder it lives in", the target highlights as you hover, and open tabs, unsaved buffers and the active file all follow the move. Moves are plain renames on disk, so git sees them as moves. The picker under the tree now takes several files at once too.
 
 ### Fixed

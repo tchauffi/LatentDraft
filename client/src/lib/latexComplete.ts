@@ -41,7 +41,8 @@ const ENVIRONMENTS = [
 const PACKAGES = [
   "amsmath", "amssymb", "amsfonts", "graphicx", "hyperref", "geometry", "xcolor",
   "booktabs", "siunitx", "listings", "enumitem", "fancyhdr", "natbib", "biblatex",
-  "tikz", "subcaption", "float", "caption", "microtype", "fontawesome", "titlesec",
+  "tikz", "subcaption", "float", "caption", "microtype", "fontawesome5", "fontawesome",
+  "titlesec",
 ];
 
 /** Commands offered after a backslash. `{}`-terminated ones move the cursor inside. */

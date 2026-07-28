@@ -57,6 +57,19 @@ test("a broken document fails with a log, not a crash", async () => {
   assert.match(result.log, /> 1: \\documentclass\{article\}\\begin\{document\}\\thisMacroDoesNotExist/);
 });
 
+// fontawesome5 aborts Tectonic's XeTeX outright (`free(): invalid pointer`,
+// no PDF and no LaTeX error) unless server/texmf/fontawesome5-utex-helper.sty
+// is on the engine's search path. This is the regression guard for that shim.
+test("fontawesome5 compiles instead of crashing the engine", async () => {
+  const result = await compileTex(
+    session("fa5"),
+    "\\documentclass{article}\\usepackage{fontawesome5}\\begin{document}" +
+      "\\faEnvelope\\ \\faGithub\\ \\faIcon{camera}\\ \\faStar[regular]\\end{document}",
+  );
+  assert.equal(result.ok, true, result.log);
+  assert.doesNotMatch(result.log, /engine CRASHED|invalid pointer/i);
+});
+
 test("aux files are written and resolved by \\input", async () => {
   const id = session("aux");
   await writeSessionFiles(id, {
