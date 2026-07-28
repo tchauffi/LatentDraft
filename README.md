@@ -57,7 +57,23 @@ npm start         # serves UI + API together on http://127.0.0.1:5174
 
 ## Security
 
-LatentDraft is a **single-user, local tool**. The server binds to `127.0.0.1` by default, has **no authentication**, and the agent's `run_python` tool **executes arbitrary code on your machine** — that is the feature, but it means every API endpoint is as trusted as your own shell. Never set `HOST=0.0.0.0` (or put the server behind a reverse proxy) on a network you don't fully trust without adding an authentication layer in front.
+LatentDraft is a **single-user, local tool**. The server binds to `127.0.0.1` by default and has **no authentication**, so every API endpoint is as trusted as your own shell. Never set `HOST=0.0.0.0` (or put the server behind a reverse proxy) on a network you don't fully trust without adding an authentication layer in front.
+
+### The `run_python` sandbox
+
+The agent decides what Python to run, and that decision can be steered by whatever it just read — a web page from `web_search`, a job posting from `fetch_url`, an uploaded spreadsheet. So the snippet is treated as **untrusted input**, not as something you typed:
+
+- **Linux** — [bubblewrap](https://github.com/containers/bubblewrap) when the kernel allows unprivileged user namespaces: no network, no filesystem beyond the build directory, its own PID/IPC/UTS namespaces, no `$HOME`, no repo source. Where user namespaces are blocked (Ubuntu ≥23.10 sets `kernel.apparmor_restrict_unprivileged_userns=1` by default), the **Landlock** LSM is used instead — the interpreter restricts *itself* before running your snippet, with reads allowlisted to system paths plus the build directory, writes confined to the build directory, and TCP denied at the kernel level. Both are inherited by anything the snippet spawns and cannot be undone.
+- **macOS** — `sandbox-exec` denies network access and every write outside the build directory. Reads are *not* confined (a `deny default` profile breaks the Python runtime), so it is a weaker layer than the Linux ones.
+- **Everywhere** — hard rlimits the snippet cannot raise (address space, max file size, CPU, no core dumps), a 30 s wall clock that kills the whole process group, a socket block inside the interpreter (covering the UDP that Landlock doesn't), and an environment **stripped of every API key** before the interpreter starts.
+
+The server prints what it actually got at startup:
+
+```
+[server] run_python sandbox: Landlock LSM — build dir only (no network, 2048 MB, 30s)
+```
+
+If no OS layer is available it says so as a **warning** and falls back to the in-process limits alone — the snippet can then read and write whatever you can. Set `PYTHON_SANDBOX=strict` to make `run_python` refuse to run instead, or `PYTHON_SANDBOX=off` to skip the OS sandbox entirely (not recommended — the in-process limits above still apply, but nothing stops the snippet from touching the rest of your disk). Sandboxing applies to `run_python` only; `view_pdf` and `ats_check` run LatentDraft's own scripts.
 
 ## Configuration (environment variables)
 
@@ -68,7 +84,7 @@ The server reads these at startup (plain environment variables — there is no `
 | `PROJECTS_ROOT`     | `~/LatentDraft`          | Directory holding the project folders                |
 | `SKILLS_ROOT`       | `~/.latentdraft/skills`  | Directory holding global [skills](#skills-bring-your-own-commands) |
 | `PORT`              | `5174`                   | API server port                                      |
-| `HOST`              | `127.0.0.1`              | Bind address. Keep localhost — `run_python` executes arbitrary code |
+| `HOST`              | `127.0.0.1`              | Bind address. Keep localhost — the API is unauthenticated |
 | `COMPILE_TIMEOUT_MS`| `300000`                 | Kill a Tectonic compile after this many ms           |
 | `TECTONIC_BIN`      | `./bin/tectonic`         | Path to the Tectonic binary                          |
 | `OLLAMA_BASE_URL`   | `http://localhost:11434` | Ollama host                                          |
@@ -83,6 +99,11 @@ The server reads these at startup (plain environment variables — there is no `
 | `ANTHROPIC_API_KEY` | —                        | Enables the Anthropic provider                       |
 | `ANTHROPIC_MODELS`  | `claude-opus-4-8,claude-sonnet-5` | Anthropic models to show                    |
 | `PYTHON_BIN`        | `server/.venv/bin/python` | Interpreter for `run_python`/`view_pdf`/`ats_check` |
+| `PYTHON_SANDBOX`    | `auto`                   | [`run_python` confinement](#the-run_python-sandbox): `auto` uses the best the OS offers and warns if that is nothing, `strict` refuses to run without an OS sandbox, `off` skips the OS sandbox (in-process limits stay) |
+| `PYTHON_ALLOW_NET`  | —                        | `1` lets `run_python` reach the network (off by default: figures are built from local data, and an offline snippet can't exfiltrate anything) |
+| `PYTHON_TIMEOUT_MS` | `30000`                  | Kill a `run_python` snippet after this many ms          |
+| `PYTHON_MEM_MB`     | `2048`                   | Address-space limit for a `run_python` snippet          |
+| `PYTHON_MAX_FILE_MB`| `128`                    | Largest file a `run_python` snippet may write           |
 | `TAVILY_API_KEY`    | —                        | Use Tavily for `web_search` (else Brave, else DuckDuckGo) |
 | `BRAVE_API_KEY`     | —                        | Use the Brave Search API for `web_search`            |
 | `CROSSREF_MAILTO`   | —                        | Contact email sent with `check_bibtex`'s Crossref lookups — opts into their [polite pool](https://api.crossref.org/swagger-ui/index.html), which is far less likely to rate-limit |
@@ -104,7 +125,7 @@ The agent runs a multi-step loop against a **working copy** of your document, us
 - `compile_check()` — compiles the working copy with Tectonic and returns success or the error log.
 - `web_search(query)` — researches on the web (DuckDuckGo by default; Tavily/Brave with a key).
 - `fetch_url(url)` — fetches one specific web page and returns its readable text (a job posting, an article, docs). Login-walled or JavaScript-only pages degrade gracefully: the agent is told to ask you to paste the text instead of guessing.
-- `run_python(code)` — runs Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build dir, mainly to generate figures you then `\includegraphics`. The agent compiles in the **same session directory as your preview**, so a generated figure still resolves after you accept the edit. Generated files appear in the editor's file tree (purple dot); click one to preview it.
+- `run_python(code)` — runs Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build dir, mainly to generate figures you then `\includegraphics`. The agent compiles in the **same session directory as your preview**, so a generated figure still resolves after you accept the edit. Generated files appear in the editor's file tree (purple dot); click one to preview it. The snippet runs **[sandboxed](#the-run_python-sandbox)**: offline, confined to the build directory, with memory/CPU/time limits and no access to your API keys.
 - `render_mermaid(code, filename?)` — renders a Mermaid diagram (flowchart, sequence, class, state, ER, gantt, pie, mindmap, …) to a print-quality PNG in the build dir, for conceptual/structural figures that would be awkward to draw in matplotlib.
 - **Data import**: the *"+ Add data file"* button under the file tree uploads a CSV/Excel/image into the compile session — the agent can then `pd.read_csv`/`pd.read_excel` it in `run_python` and plot it with seaborn.
 - `view_pdf(max_pages?)` — compiles and **inspects the PDF's actual layout**: a text report the model can act on (page count/paper size, per-page text coverage and margins, content clipped at page edges, Overfull `\hbox` lines with `main.tex` line numbers, near-empty trailing pages, font usage), and — for **vision-capable models** — the **rendered page images themselves**, attached right after the call so the model literally looks at the document (layout, figures, colors, typography) instead of inferring it. Up to 20 pages per look (it asks for the deck's full page count when reviewing slides). The loop is **iterative**: if the model edits after looking and doesn't re-check, the server re-renders and shows it the updated pages until the fix actually looks right (2 extra looks max per turn). Vision is detected automatically for Ollama models and always on for Anthropic; for OpenAI-compatible endpoints, list your multimodal models in `OPENAI_VISION_MODELS`. Text-only models keep the report-only behavior. Generated figures get the same treatment: `run_python` plots and `render_mermaid` diagrams are attached as images the moment they're produced, so a vision model verifies its own figures (labels, legends, nothing cut off) and regenerates if needed.
