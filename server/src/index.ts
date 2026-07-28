@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   cleanupStaleSessions,
   compileProject,
+  texmfSummary,
 } from "./compile.js";
 import {
   listProjects,
@@ -357,6 +358,11 @@ const server = app.listen(PORT, HOST, () => {
   void pythonSandboxSummary().then((s) => {
     const unconfined = s.startsWith("NONE");
     console[unconfined ? "warn" : "log"](`[server] run_python sandbox: ${s}`);
+  });
+  // Likewise for the LaTeX-side shims: if the engine can't see them, say so
+  // rather than letting fontawesome5 abort a compile with no explanation.
+  void texmfSummary().then((s) => {
+    console[s.startsWith("UNAVAILABLE") ? "warn" : "log"](`[server] texmf: ${s}`);
   });
 });
 // Startup failures (e.g. EADDRINUSE) must exit, not linger as a dead process

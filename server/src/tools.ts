@@ -729,7 +729,12 @@ export function createAgentTools(opts: AgentToolsOptions) {
       }
       try {
         const resumeText = await extractPdfText(compiled.pdf);
-        const report = analyzeAts({ resumeText, jobDescription: job_description });
+        // Read the icon-font answer off the source: fontawesome5's glyphs reach
+        // the text layer as plain mojibake, so the PDF alone can't reveal them.
+        const usesIconFont = /\\usepackage(\[[^\]]*\])?\{[^}]*fontawesome/i.test(
+          state.docs.get(MAIN) ?? "",
+        );
+        const report = analyzeAts({ resumeText, jobDescription: job_description, usesIconFont });
         emitTool({ name: "ats_check", summary: "Ran ATS analysis", ok: true });
         return report;
       } catch (err) {
@@ -1093,8 +1098,8 @@ Rules:
 - old_string must appear EXACTLY ONCE in the current working document — copy it verbatim, including indentation and newlines. After an edit, the document has changed; base later edits on the updated text. If an edit comes back NOT APPLIED, call read_document and re-anchor on the actual current text instead of guessing again.
 - Keep edits small and local; prefer several edits over one huge one.
 - When creating a document from scratch or replacing essentially all of it (e.g. "make a resume for X", "turn this into a cover letter", "write a report about Y"), call edit_document ONCE with old_string OMITTED and the complete new document in new_string. Do not try to anchor onto the placeholder/sample text.
-- For FontAwesome icons (\\faPhone, \\faEnvelope, \\faGithub, \\faLinkedin, \\faMapMarker, …) use \\usepackage{fontawesome} — the classic v4 package, which compiles fine here. NEVER use \\usepackage{fontawesome5}: its load-time glyph-name introspection (\\XeTeXglyphname) CRASHES this system's Tectonic/XeTeX engine. The \\faXxx command names for common CV icons are the same in both packages, so just swap the package name.
-- If compile_check reports that the engine CRASHED (e.g. "invalid pointer", "core dumped", "engine CRASHED", or a fontawesome/OTF failure), do NOT retry the same source. If it was fontawesome5, replace \\usepackage{fontawesome5} with \\usepackage{fontawesome} (v4); otherwise remove the offending OTF font package, then compile_check again.
+- For FontAwesome icons (\\faPhone, \\faEnvelope, \\faGithub, \\faLinkedin, \\faMapMarker, …) use \\usepackage{fontawesome5} — it compiles here and covers the full Font Awesome 5 Free set, including \\faIcon{name} and the style option (\\faStar[regular]). The classic v4 \\usepackage{fontawesome} also still works. Two limits: the [pro] option is NOT available, and "-alt" spellings like \\faFileAlt do not exist — use the style option instead (\\faFile[regular]).
+- If compile_check reports that the engine CRASHED (e.g. "invalid pointer", "core dumped", "engine CRASHED", or an OTF font failure), do NOT retry the same source — remove the offending OTF font package (anything loaded through fontspec), then compile_check again.
 - Missing packages are a common failure — if the log says a command is undefined (e.g. \\href needs hyperref), add the \\usepackage.
 - When check_bibtex reports problems: fix wrong keys by anchoring edit_document on the quoted "> N:" source lines; for entries flagged MISMATCH or NOT FOUND, find the real publication with web_search and correct the .bib fields, or tell the user which references appear fabricated. Entries it could NOT check (❓) are not necessarily wrong — leave them and mention them. After your fixes, run check_bibtex AGAIN to confirm they resolve — never end the turn on unverified bibliography fixes. NEVER invent bibliographic data (authors, titles, years, DOIs).
 - For pure questions ("what does amsmath give me?"), just answer — don't edit or compile.

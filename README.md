@@ -25,6 +25,8 @@ The agent is **provider-agnostic**: it defaults to a local **Ollama** model (no 
   cd bin && curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
   ```
   (Or install system-wide and set `TECTONIC_BIN=/path/to/tectonic`.) The **first** compile downloads LaTeX packages and is slow; later compiles hit the cache.
+
+  Compiles also get `server/texmf` on the engine's search path, which is how `\usepackage{fontawesome5}` works here: upstream's XeTeX helper walks every glyph of the OTF and aborts Tectonic, so a shim routes the package through its Type1 path instead — same 1377 `\faXxx` commands, `\faIcon{name}`, and styles (`\faStar[regular]`). Font Awesome 5 **Free** only: the `[pro]` option needs fonts Tectonic's bundle doesn't ship. A file of the same name in your project directory still wins, and `\usepackage{fontawesome}` (v4) is untouched. This needs a Tectonic with `-Z search-path`; if `TECTONIC_BIN` points at one without it, the server says so at startup and fontawesome5 stays unusable.
 - **Ollama** (for the default agent) — install from https://ollama.com, then pull a model:
   ```sh
   ollama serve            # if not already running

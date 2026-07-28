@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const TMP_ROOT = path.resolve(__dirname, "..", "tmp");
+/** Our own .sty files, put on Tectonic's search path so they shadow the bundle. */
+const TEXMF_DIR = path.resolve(__dirname, "..", "texmf");
 
 // Prefer the locally-downloaded Tectonic, fall back to PATH.
 const LOCAL_TECTONIC = path.join(REPO_ROOT, "bin", "tectonic");
@@ -16,6 +18,44 @@ const COMPILE_TIMEOUT_MS = Number(process.env.COMPILE_TIMEOUT_MS ?? 300_000);
 
 // Session dirs older than this are deleted at startup.
 const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether this Tectonic understands `-Z search-path`, the flag that puts
+ * `server/texmf` on its file search path (see texmf/fontawesome5-utex-helper.sty
+ * — it is what makes `\usepackage{fontawesome5}` compile instead of aborting the
+ * engine). `-Z` options are unstable and TECTONIC_BIN may point at an older
+ * system install, where an unknown one is a hard argument error that would fail
+ * EVERY compile — so ask the binary first, once, and cache the answer.
+ */
+let searchPathSupport: Promise<boolean> | undefined;
+
+export function texmfSearchPathSupported(): Promise<boolean> {
+  // `-Z help` lists the supported options and exits without compiling, so the
+  // input path is never read (and need not exist).
+  searchPathSupport ??= new Promise<boolean>((resolve) => {
+    let out = "";
+    let child;
+    try {
+      child = spawn(TECTONIC_BIN, ["-X", "compile", "-Z", "help", "_ld_probe.tex"]);
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.stderr.on("data", (d) => (out += d.toString()));
+    child.on("error", () => resolve(false));
+    child.on("close", () => resolve(/search-path/.test(out)));
+  });
+  return searchPathSupport;
+}
+
+/** One-line startup report: are our shim packages reachable by the engine? */
+export async function texmfSummary(): Promise<string> {
+  return (await texmfSearchPathSupported())
+    ? `fontawesome5 shim active (${TEXMF_DIR})`
+    : `UNAVAILABLE — ${TECTONIC_BIN} has no \`-Z search-path\`, so \\usepackage{fontawesome5} ` +
+        `will crash the engine. Use the Tectonic from \`npm run setup\` or unset TECTONIC_BIN.`;
+}
 
 export interface CompileResult {
   ok: boolean;
@@ -136,10 +176,11 @@ export async function cleanupStaleSessions(): Promise<void> {
 
 /**
  * Detect a native engine crash (as opposed to a normal LaTeX error) and return
- * an actionable hint. The most common cause on this setup is the fontawesome5
- * package: at load time it introspects glyph names via \XeTeXglyphname, which
- * aborts Tectonic's XeTeX engine (`free(): invalid pointer`). The classic v4
- * `fontawesome` package does not do this and compiles fine.
+ * an actionable hint. fontawesome5 used to be the usual cause — its uTeX helper
+ * introspects glyph names via \XeTeXglyphname, which aborts Tectonic's XeTeX
+ * engine (`free(): invalid pointer`) — but texmf/fontawesome5-utex-helper.sty
+ * now routes it through the Type1 path, so seeing it here means the shim did
+ * not reach the engine rather than that the package is unusable.
  */
 function diagnoseCrash(
   log: string,
@@ -159,7 +200,7 @@ function diagnoseCrash(
   if (/fontawesome/i.test(log) || /fontawesome/i.test(tex) || /\.otf\b/i.test(log)) {
     return (
       base +
-      " Cause: the fontawesome5 package crashes this system's XeTeX engine (it probes glyph names via \\XeTeXglyphname at load time). Fix: replace \\usepackage{fontawesome5} with \\usepackage{fontawesome} — the classic v4 package compiles fine here and keeps the same \\faXxx icon commands (\\faEnvelope, \\faPhone, \\faGithub, \\faLinkedin, \\faMapMarker, …)."
+      " Cause: an OTF icon font was loaded through this system's XeTeX engine, which aborts while probing glyph names. fontawesome5 is normally handled by a compatibility shim here, so this means the shim did not apply — report it, and meanwhile use \\usepackage{fontawesome} (the classic v4 package, same \\faXxx command names for common icons: \\faEnvelope, \\faPhone, \\faGithub, \\faLinkedin, \\faMapMarker, …)."
     );
   }
   return (
@@ -511,6 +552,9 @@ async function runTectonic(dir: string, outDir: string, tex: string): Promise<Co
     outDir,
     "--keep-logs",
     "--synctex", // main.synctex.gz next to the PDF, for editor↔preview jumps
+    // Our compatibility shims (fontawesome5) shadow the bundle's copies. Files
+    // in the document's own directory still win, so a project can override.
+    ...((await texmfSearchPathSupported()) ? ["-Z", `search-path=${TEXMF_DIR}`] : []),
     "main.tex",
   ];
 

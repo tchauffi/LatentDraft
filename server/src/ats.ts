@@ -41,9 +41,17 @@ export interface AtsInput {
   resumeText: string;
   /** Optional target job description to score keyword coverage against. */
   jobDescription?: string;
+  /**
+   * Whether the source loads an icon font (fontawesome/fontawesome5). Worth
+   * passing when it is known: only *some* icon fonts leave a recognisable trace
+   * in the extracted text — fontawesome5 renders through Type1 fonts here, so
+   * its glyphs come out as ordinary-looking mojibake rather than private-use
+   * codepoints, and the check below would miss them.
+   */
+  usesIconFont?: boolean;
 }
 
-export function analyzeAts({ resumeText, jobDescription }: AtsInput): string {
+export function analyzeAts({ resumeText, jobDescription, usesIconFont }: AtsInput): string {
   const text = resumeText.replace(/\f/g, "\n");
   const words = (text.match(/\S+/g) ?? []).length;
   const lines: string[] = [];
@@ -80,10 +88,10 @@ export function analyzeAts({ resumeText, jobDescription }: AtsInput): string {
   );
 
   // 4. Icon/glyph artifacts that hint at unparseable content.
-  if (/[\uE000-\uF8FF]/.test(text)) {
+  if (usesIconFont || /[\uE000-\uF8FF]/.test(text)) {
     lines.push(
-      "⚠️ Private-use Unicode glyphs detected (typically FontAwesome icons). ATS parsers drop these — " +
-        "keep contact labels as plain text (e.g. \"Email:\", \"GitHub:\").",
+      "⚠️ Icon-font glyphs detected (typically FontAwesome). ATS parsers drop them or read them as " +
+        "garbage characters — keep contact labels as plain text (e.g. \"Email:\", \"GitHub:\").",
     );
   }
 

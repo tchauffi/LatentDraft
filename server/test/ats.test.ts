@@ -53,5 +53,16 @@ test("keyword coverage reports terms missing from the resume", () => {
 
 test("private-use glyphs (icon fonts) are flagged", () => {
   const report = analyzeAts({ resumeText: GOOD_RESUME + "\n icons here" });
-  assert.match(report, /Private-use Unicode glyphs/);
+  assert.match(report, /Icon-font glyphs detected/);
+});
+
+// fontawesome5 renders through Type1 fonts here, so its glyphs reach the text
+// layer as ordinary-looking characters — only the source gives it away.
+test("icon fonts declared in the source are flagged without private-use glyphs", () => {
+  const report = analyzeAts({ resumeText: GOOD_RESUME, usesIconFont: true });
+  assert.match(report, /Icon-font glyphs detected/);
+});
+
+test("no icon-font warning when neither signal is present", () => {
+  assert.ok(!/Icon-font glyphs/.test(analyzeAts({ resumeText: GOOD_RESUME })));
 });

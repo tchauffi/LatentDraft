@@ -74,8 +74,7 @@ Turbulence remains a central open problem in classical physics.
 \\usepackage{titlesec}
 \\usepackage{enumitem}
 \\usepackage{hyperref}
-% NOTE: fontawesome (v4) works here; fontawesome5 crashes this engine.
-\\usepackage{fontawesome}
+\\usepackage{fontawesome5}
 
 \\titleformat{\\section}{\\large\\bfseries}{}{0em}{}[\\titlerule]
 \\pagestyle{empty}
