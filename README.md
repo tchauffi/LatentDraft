@@ -98,7 +98,7 @@ The server reads these at startup (plain environment variables — there is no `
 | `OPENAI_VISION_MODELS` | —                     | Comma-separated OpenAI-compatible model ids that accept images — `view_pdf`'s rendered pages are attached for them (not discoverable from the endpoint, so opt in per model) |
 | `ANTHROPIC_API_KEY` | —                        | Enables the Anthropic provider                       |
 | `ANTHROPIC_MODELS`  | `claude-opus-4-8,claude-sonnet-5` | Anthropic models to show                    |
-| `PYTHON_BIN`        | `server/.venv/bin/python` | Interpreter for `run_python`/`view_pdf`/`ats_check` |
+| `PYTHON_BIN`        | `server/.venv/bin/python` | Interpreter for `run_python`/`view_pdf`/`ats_check`. A bare name (`python3`) is resolved on the server's `PATH` at startup, and that interpreter's own stdlib/site-packages are allowlisted in the sandbox — so a venv, pyenv or conda Python works |
 | `PYTHON_SANDBOX`    | `auto`                   | [`run_python` confinement](#the-run_python-sandbox): `auto` uses the best the OS offers and warns if that is nothing, `strict` refuses to run without an OS sandbox, `off` skips the OS sandbox (in-process limits stay) |
 | `PYTHON_ALLOW_NET`  | —                        | `1` lets `run_python` reach the network (off by default: figures are built from local data, and an offline snippet can't exfiltrate anything) |
 | `PYTHON_TIMEOUT_MS` | `30000`                  | Kill a `run_python` snippet after this many ms          |
