@@ -554,7 +554,9 @@ export function createAgentTools(opts: AgentToolsOptions) {
       "user uploaded (CSV/Excel) sit in the same directory — load them with " +
       "`pd.read_csv('data.csv')` / `pd.read_excel('data.xlsx')` and plot with seaborn. " +
       "Files you write here sit next to the .tex, so reference them by bare filename. " +
-      "matplotlib uses a headless backend; do not call plt.show(). 30s time limit. " +
+      "matplotlib uses a headless backend; do not call plt.show(). The snippet runs " +
+      "SANDBOXED: no network access (read data from files in this directory, never from " +
+      "a URL), no reading or writing outside this directory, 30s and a memory limit. " +
       "Returns stdout/stderr and the list of files created.",
     inputSchema: z.object({
       code: z.string().describe("The Python source to execute."),
@@ -1053,7 +1055,7 @@ You have tools:
 - compile_check(): compile the current working document and get back success or the error log.
 - web_search(query, max_results?): research anything on the web (job postings, companies, technologies, wording). Use it before writing when you need facts you don't have.
 - fetch_url(url): fetch one specific web page and get its readable text. Use it when you HAVE a URL (a job posting, an article) — web_search finds pages, fetch_url reads one. If it returns little or no text (login wall, scripted page), ask the user to paste the content instead of guessing.
-- run_python(code): run Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Uploaded data files (CSV/Excel) are in the same directory: pd.read_csv("data.csv") / pd.read_excel("data.xlsx"), then plot with seaborn. Reference files by bare filename; do not call plt.show().
+- run_python(code): run Python (matplotlib, seaborn, pandas, numpy, openpyxl) in the build directory, mainly to GENERATE FIGURES. Save as PNG, e.g. plt.savefig("figure.png", dpi=200, bbox_inches="tight"), then edit_document to add \\includegraphics{figure.png}. Uploaded data files (CSV/Excel) are in the same directory: pd.read_csv("data.csv") / pd.read_excel("data.xlsx"), then plot with seaborn. Reference files by bare filename; do not call plt.show(). The snippet is SANDBOXED — offline (no URLs, no downloads, no pip) and confined to this directory — so build figures from the data files that are already here; if you truly need data from the web, fetch it with web_search/fetch_url and paste the values into the code.
 - render_mermaid(code, filename?): render a Mermaid DIAGRAM (flowchart, sequence, class, state, ER, gantt, pie, mindmap) to a PNG in the build directory. Prefer it over Python for conceptual/structural diagrams. Pass raw Mermaid source (no fences), then edit_document to add \\includegraphics{<filename>}.
 - view_pdf(max_pages?): compile and INSPECT the PDF's actual layout — page count, per-page text coverage and margins, content clipped at page edges, Overfull \\hbox lines (text sticking past the right margin, with main.tex line numbers), near-empty trailing pages, fonts. This is how you SEE the result. When the user mentions layout, formatting, spacing, or "how it looks", call view_pdf first, then fix what it reports and call it again to confirm. Reviewing a slide deck or a whole multi-page document? Pass max_pages set to its page count (up to 20) so EVERY page is inspected — the default renders only the first 3.
 - ats_check(job_description?): compile, extract the PDF text, and get an ATS (Applicant Tracking System) report — parseability, contact fields, sections, icon artifacts, and keyword coverage vs a job posting. Use on resumes/CVs.
