@@ -70,6 +70,38 @@ export function buildFileTree(
   return toNodes(root, "", true);
 }
 
+/** The folder a path lives in; "" for entries at the project root. */
+export function parentOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? "" : path.slice(0, i);
+}
+
+/** Where a dragged entry lands, or why the drop is not allowed. */
+export type MoveTarget = { ok: true; to: string } | { ok: false; reason?: string };
+
+/**
+ * Resolve dropping `from` (a file or folder path) onto `toDir` ("" = project
+ * root). Returns the destination path, or ok:false for a drop that should be
+ * rejected outright — dropping onto the folder it already lives in is a no-op,
+ * and a folder cannot be dropped into itself or its own descendants (that
+ * would bury it). `reason` is set only when the user deserves an explanation;
+ * a plain no-op drop stays silent.
+ */
+export function moveTarget(from: string, toDir: string): MoveTarget {
+  const src = from.replace(/^\/+|\/+$/g, "");
+  const dest = toDir.replace(/^\/+|\/+$/g, "");
+  if (!src) return { ok: false };
+  if (src === "main.tex") {
+    return { ok: false, reason: "main.tex is the compile target — it cannot be moved." };
+  }
+  if (dest === parentOf(src)) return { ok: false }; // already there
+  const name = src.split("/").pop()!;
+  if (dest === src || dest.startsWith(`${src}/`)) {
+    return { ok: false, reason: `Cannot move ${src} into itself.` };
+  }
+  return { ok: true, to: dest ? `${dest}/${name}` : name };
+}
+
 const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp)$/i;
 
 /** Whether a file should preview as an image (vs text/other embed). */

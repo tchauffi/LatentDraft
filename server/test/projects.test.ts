@@ -299,3 +299,38 @@ test("renameProjectFile moves a whole directory", async () => {
     "print(1)",
   );
 });
+
+test("renameProjectFile refuses to overwrite an existing destination", async () => {
+  await createProject("moveclash");
+  await writeProjectFile("moveclash", "notes.md", Buffer.from("keep me"));
+  await writeProjectFile("moveclash", "draft.md", Buffer.from("other"));
+  const r = await renameProjectFile("moveclash", "draft.md", "notes.md");
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /already exists/);
+  // Neither file was touched — fs.rename would have silently clobbered notes.md.
+  const dir = projectDir("moveclash")!;
+  assert.equal(await readFile(path.join(dir, "notes.md"), "utf8"), "keep me");
+  assert.equal(await readFile(path.join(dir, "draft.md"), "utf8"), "other");
+});
+
+test("renameProjectFile refuses to move a folder into itself", async () => {
+  await createProject("moveself");
+  await writeProjectFile("moveself", "data/raw/x.csv", Buffer.from("1"));
+  const r = await renameProjectFile("moveself", "data", "data/raw/data");
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /into itself/);
+});
+
+test("renameProjectFile refuses to move main.tex — it is the compile target", async () => {
+  await createProject("movemain");
+  const r = await renameProjectFile("movemain", "main.tex", "src/main.tex");
+  assert.equal(r.ok, false);
+  await access(path.join(projectDir("movemain")!, "main.tex")); // still there
+});
+
+test("renameProjectFile moves a file into a folder that does not exist yet", async () => {
+  await createProject("movedeep");
+  await writeProjectFile("movedeep", "fig.png", Buffer.from("png"));
+  assert.deepEqual(await renameProjectFile("movedeep", "fig.png", "figures/fig.png"), { ok: true });
+  assert.equal(await readFile(path.join(projectDir("movedeep")!, "figures", "fig.png"), "utf8"), "png");
+});

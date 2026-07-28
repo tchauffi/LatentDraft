@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Drag and drop in the file tree.** Drop files — or a whole folder, whose structure is preserved — from your desktop anywhere on the tree to add them to the project: onto a folder row to land inside it, onto the background for the project root. Dragging rows within the tree reorganises the project, so a figure or a section finally moves into a folder without a rename dialog and a retyped path. Dropping onto a *file* means "into the folder it lives in", the target highlights as you hover, and open tabs, unsaved buffers and the active file all follow the move. Moves are plain renames on disk, so git sees them as moves. The picker under the tree now takes several files at once too.
+
+### Fixed
+
+- Renaming or moving a file onto an existing one no longer silently destroys the destination — `fs.rename` reported success while replacing it. The server refuses the collision (a case-only rename on a case-insensitive filesystem still works), and also refuses to move `main.tex`, which would leave the project with no compile target, or to bury a folder inside its own descendant.
+
 ## [0.3.0] - 2026-07-15
 
 ### Added
