@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+// The same resolved absolute interpreter run_python uses — these scripts are
+// ours rather than the agent's, so they run unsandboxed, but they must not
+// resolve to a DIFFERENT python than the one the server probed at startup.
+import { PYTHON_BIN } from "./sandbox.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_ROOT = path.resolve(__dirname, "..");
-const VENV_PYTHON = path.join(SERVER_ROOT, ".venv", "bin", "python");
-const PYTHON_BIN = process.env.PYTHON_BIN ?? VENV_PYTHON;
 
 /** Run the venv python with an inline script; resolve stdout, reject on failure. */
 function runPy(script: string, args: string[]): Promise<string> {

@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Renaming or moving a file onto an existing one no longer silently destroys the destination — `fs.rename` reported success while replacing it. The server refuses the collision (a case-only rename on a case-insensitive filesystem still works), and also refuses to move `main.tex`, which would leave the project with no compile target, or to bury a folder inside its own descendant.
+### Security
+
+- **`run_python` is now sandboxed.** The agent's Python snippets are treated as untrusted input — what the model writes can be steered by a web page it searched, a URL it fetched, or a spreadsheet you uploaded — so they no longer run with your full user rights. On **Linux**: bubblewrap when the kernel allows unprivileged user namespaces (no network, no filesystem beyond the build directory, own PID/IPC/UTS namespaces, no `$HOME`), and otherwise the **Landlock** LSM, which the interpreter applies to itself — reads allowlisted to system paths plus the build directory, writes confined to the build directory, TCP denied in the kernel. This matters because Ubuntu ≥23.10 blocks the user namespaces bubblewrap needs, which would otherwise have left the sandbox as a no-op on the most common desktop setup. On **macOS**: `sandbox-exec` denies the network and every write outside the build directory. On **every** platform: hard rlimits the snippet cannot raise (address space, file size, CPU, core dumps), a wall-clock timeout that kills the whole process group, a socket block inside the interpreter, and an environment **stripped of every API key** — so a figure script can no longer read `ANTHROPIC_API_KEY`, your SSH keys, or anything outside the document it is illustrating. The mode is probed by actually running the real command line at startup and reported in the log; `PYTHON_SANDBOX=strict` refuses to run when no OS sandbox is available, `PYTHON_ALLOW_NET=1` re-enables the network, and `PYTHON_TIMEOUT_MS` / `PYTHON_MEM_MB` / `PYTHON_MAX_FILE_MB` tune the limits.
+
+### Fixed
+
+- `run_python` tracebacks report the **snippet's own line numbers** again: the hardening runs from a separate bootstrap file and launches the snippet through `runpy`, instead of being prepended to it, so "line 3" means line 3 of the code the model wrote.
 
 ## [0.3.0] - 2026-07-15
 

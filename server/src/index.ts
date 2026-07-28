@@ -31,6 +31,7 @@ import { TEMPLATES } from "./templates.js";
 import { listSkills } from "./skills.js";
 import { loadProjectSyncTex, forwardSearch, reverseSearch } from "./synctex.js";
 import { listProviders } from "./providers.js";
+import { pythonSandboxSummary } from "./python.js";
 import { streamChat, type ChatRequest } from "./chat.js";
 
 // Node's default warning output (e.g. MaxListenersExceededWarning) is one
@@ -351,6 +352,12 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
 
 const server = app.listen(PORT, HOST, () => {
   console.log(`[server] LatentDraft API listening on http://${HOST}:${PORT}`);
+  // Say out loud how confined run_python actually is — an unconfined fallback
+  // must never be something the user only discovers after the fact.
+  void pythonSandboxSummary().then((s) => {
+    const unconfined = s.startsWith("NONE");
+    console[unconfined ? "warn" : "log"](`[server] run_python sandbox: ${s}`);
+  });
 });
 // Startup failures (e.g. EADDRINUSE) must exit, not linger as a dead process
 // kept alive by the log-and-continue uncaughtException handler above.
