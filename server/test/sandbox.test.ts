@@ -4,7 +4,16 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runPythonIn } from "../src/python.js";
-import { bootstrapSource, buildPythonSpawn, resolveSandbox, safeEnv } from "../src/sandbox.js";
+import {
+  bootstrapSource,
+  buildPythonSpawn,
+  PYTHON_BIN,
+  pythonLibDirs,
+  resolvePythonBin,
+  resolveSandbox,
+  safeEnv,
+} from "../src/sandbox.js";
+import { execFileSync } from "node:child_process";
 
 // run_python executes code the MODEL wrote, and what the model writes can be
 // steered by anything it read (a web page, an uploaded file). These tests pin
@@ -148,4 +157,50 @@ test("the build directory itself stays fully usable", async () => {
   assert.equal(res.ok, true, res.output);
   assert.match(res.output, /rows: 3/);
   assert.ok(res.createdFiles.includes("trend.png"), res.createdFiles.join(", "));
+});
+
+// The snippet runs with a deliberately minimal PATH, so a bare PYTHON_BIN
+// ("python3", which this project's own CI sets) used to be re-resolved INSIDE
+// the sandbox — silently running whichever interpreter /usr/bin held instead
+// of the one the server probed, and losing every package with it.
+test("PYTHON_BIN is resolved to an absolute path before the sandbox sees it", () => {
+  assert.ok(path.isAbsolute(PYTHON_BIN), `PYTHON_BIN not absolute: ${PYTHON_BIN}`);
+  // A bare name is looked up on the SERVER's PATH...
+  const sh = resolvePythonBin("sh");
+  assert.ok(path.isAbsolute(sh), `bare name not resolved: ${sh}`);
+  // ...a relative path is made absolute...
+  assert.ok(path.isAbsolute(resolvePythonBin("./python")));
+  // ...and an absolute one is left alone.
+  assert.equal(resolvePythonBin("/usr/bin/python3"), "/usr/bin/python3");
+  // Nothing on PATH matches: hand it back so the spawn fails loudly rather
+  // than quietly resolving to some other interpreter.
+  assert.equal(resolvePythonBin("ld-no-such-interpreter"), "ld-no-such-interpreter");
+});
+
+test("the interpreter's own prefix is allowlisted, wherever it lives", () => {
+  const prefix = execFileSync(PYTHON_BIN, ["-c", "import sys;print(sys.prefix)"], {
+    encoding: "utf8",
+  }).trim();
+  const dirs = pythonLibDirs();
+  assert.ok(
+    dirs.some((d) => prefix === d || prefix.startsWith(`${d}/`)),
+    `sys.prefix ${prefix} is not covered by ${JSON.stringify(dirs)}`,
+  );
+  // Never the whole of $HOME or / — that would undo the confinement.
+  assert.ok(!dirs.includes("/"));
+  assert.ok(!dirs.includes(os.homedir()));
+});
+
+test("bwrap binds the interpreter's libraries, not a guess from its path", () => {
+  const spec = buildPythonSpawn("bwrap", dir, ["-c", "pass"]);
+  for (const libDir of pythonLibDirs()) {
+    // Some (e.g. /usr for a venv on the system python) are already covered by
+    // the static system binds, which use --ro-bind rather than --ro-bind-try.
+    const bound = spec.args.some(
+      (arg, i) => arg === libDir && /^--ro-bind(-try)?$/.test(spec.args[i - 1] ?? ""),
+    );
+    assert.ok(bound, `${libDir} is never bound into the sandbox`);
+  }
+  // And it execs the resolved absolute interpreter, not a bare name.
+  assert.ok(spec.args.includes(PYTHON_BIN));
 });

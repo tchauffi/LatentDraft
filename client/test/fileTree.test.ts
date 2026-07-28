@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildFileTree, isImageFile } from "../src/lib/fileTree";
+import { buildFileTree, isImageFile, moveTarget, parentOf } from "../src/lib/fileTree";
 
 test("buildFileTree nests directories and marks generated files", () => {
   const tree = buildFileTree(
@@ -64,4 +64,35 @@ test("buildFileTree merges dirs with file-derived directories without duplicates
     },
     { name: "main.tex", path: "main.tex" },
   ]);
+});
+
+test("moveTarget puts the dragged entry under the destination folder", () => {
+  assert.deepEqual(moveTarget("refs.bib", "sections"), { ok: true, to: "sections/refs.bib" });
+  assert.deepEqual(moveTarget("sections/intro.tex", ""), { ok: true, to: "intro.tex" });
+  // A folder moves as its basename, not its whole path.
+  assert.deepEqual(moveTarget("data/raw", "archive"), { ok: true, to: "archive/raw" });
+});
+
+test("moveTarget rejects a drop on the folder the entry is already in", () => {
+  assert.deepEqual(moveTarget("sections/intro.tex", "sections"), { ok: false });
+  assert.deepEqual(moveTarget("refs.bib", ""), { ok: false });
+});
+
+test("moveTarget refuses to bury a folder inside itself", () => {
+  assert.equal(moveTarget("data", "data").ok, false);
+  const nested = moveTarget("data", "data/raw");
+  assert.equal(nested.ok, false);
+  assert.match((nested as { reason: string }).reason, /into itself/);
+});
+
+test("moveTarget refuses to move main.tex — it is the compile target", () => {
+  const r = moveTarget("main.tex", "sections");
+  assert.equal(r.ok, false);
+  assert.match((r as { reason: string }).reason, /compile target/);
+});
+
+test("parentOf returns the containing folder, empty at the root", () => {
+  assert.equal(parentOf("sections/intro.tex"), "sections");
+  assert.equal(parentOf("data/raw/x.csv"), "data/raw");
+  assert.equal(parentOf("main.tex"), "");
 });

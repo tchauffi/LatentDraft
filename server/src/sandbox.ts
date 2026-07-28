@@ -1,5 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { accessSync, constants as FS, realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,7 +36,32 @@ const SERVER_ROOT = path.resolve(__dirname, "..");
 
 /** Prefer the project venv (has matplotlib/numpy), fall back to system python3. */
 const VENV_PYTHON = path.join(SERVER_ROOT, ".venv", "bin", "python");
-export const PYTHON_BIN = process.env.PYTHON_BIN ?? VENV_PYTHON;
+
+/**
+ * Resolve the interpreter to an ABSOLUTE path, against the SERVER's PATH.
+ * `PYTHON_BIN=python3` is a natural thing to set (this project's own CI does),
+ * but the snippet runs with a deliberately minimal PATH — so a bare name was
+ * re-resolved *inside* the sandbox and quietly picked whichever interpreter
+ * `/usr/bin` happened to hold, not the one probed here. The packages the user
+ * installed then go missing, reported as a baffling ModuleNotFoundError (or,
+ * when nothing matches at all, `spawn python ENOENT`).
+ */
+export function resolvePythonBin(bin: string): string {
+  if (bin.includes(path.sep)) return path.resolve(bin);
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, bin);
+    try {
+      accessSync(candidate, FS.X_OK);
+      return candidate;
+    } catch {
+      /* not in this PATH entry — keep looking */
+    }
+  }
+  return bin; // let the spawn fail loudly rather than silently run another python
+}
+
+export const PYTHON_BIN = resolvePythonBin(process.env.PYTHON_BIN ?? VENV_PYTHON);
 
 /** `auto` sandboxes when the OS can, `strict` refuses to run otherwise, `off` disables it. */
 export type SandboxMode = "auto" | "strict" | "off";
@@ -64,9 +91,57 @@ const MPL_CACHE = path.join(SERVER_ROOT, "tmp", "_mplcache");
 
 export type SandboxKind = "bwrap" | "landlock" | "seatbelt" | "none";
 
+/**
+ * Where this interpreter actually keeps its standard library and packages.
+ * ASKED OF THE INTERPRETER rather than guessed from its path: a venv, pyenv,
+ * conda, or a CI runner's hosted Python each put them somewhere different, and
+ * a prefix we fail to allowlist becomes a missing module at import time. The
+ * probe runs once, at the first sandboxed launch, and is cached.
+ *
+ * The user site-packages directory is deliberately NOT included: the sandbox
+ * sets PYTHONNOUSERSITE, so it is never read, and allowlisting it would open a
+ * hole into $HOME for nothing.
+ */
+let libDirsCache: string[] | undefined;
+export function pythonLibDirs(): string[] {
+  if (libDirsCache) return libDirsCache;
+  const probe = spawnSync(
+    PYTHON_BIN,
+    [
+      "-c",
+      "import sys,site\n" +
+        "d={sys.prefix,sys.base_prefix,sys.exec_prefix,sys.base_exec_prefix}\n" +
+        "d.update(getattr(site,'getsitepackages',lambda:[])())\n" +
+        "print('\\n'.join(sorted(p for p in d if p)))\n",
+    ],
+    { encoding: "utf8", timeout: 15_000 },
+  );
+  const found = probe.status === 0 ? probe.stdout.split("\n") : [];
+  // The interpreter's own directory too — it can sit outside every prefix when
+  // /usr/local/bin/python3 symlinks off to somewhere else entirely.
+  try {
+    found.push(path.dirname(realpathSync(PYTHON_BIN)));
+  } catch {
+    found.push(path.dirname(PYTHON_BIN));
+  }
+  // Fall back to the old guess if the probe told us nothing usable.
+  if (found.length === 0) found.push(path.dirname(path.dirname(PYTHON_BIN)));
+
+  const home = os.homedir();
+  const dirs: string[] = [];
+  for (const raw of found) {
+    const p = raw.trim();
+    // "/" or $HOME itself would hand back everything the sandbox just took away.
+    if (!p || !path.isAbsolute(p) || p === "/" || p === home) continue;
+    if (dirs.some((kept) => p === kept || p.startsWith(`${kept}/`))) continue; // already covered
+    dirs.push(p);
+  }
+  libDirsCache = dirs.filter((p) => !dirs.some((other) => other !== p && p.startsWith(`${other}/`)));
+  return libDirsCache;
+}
+
 /** Read-only system paths the interpreter needs (Landlock allowlist). */
 function readPaths(workDir: string): string[] {
-  const pythonRoot = path.dirname(path.dirname(PYTHON_BIN));
   return [
     "/usr",
     "/bin",
@@ -81,7 +156,7 @@ function readPaths(workDir: string): string[] {
     "/dev",
     "/var/lib/fonts",
     "/var/cache/fontconfig",
-    pythonRoot,
+    ...pythonLibDirs(),
     workDir,
   ];
 }
@@ -132,8 +207,6 @@ function sandboxEnvPairs(workDir: string): Record<string, string> {
  * network unless PYTHON_ALLOW_NET is set.
  */
 function bwrapArgs(workDir: string, pythonArgs: string[]): string[] {
-  // .venv/bin/python -> .venv (site-packages live there); /usr/bin/python3 -> /usr.
-  const pythonRoot = path.dirname(path.dirname(PYTHON_BIN));
   const args = [
     "--die-with-parent",
     "--new-session", // no controlling terminal to inject keystrokes into
@@ -208,9 +281,9 @@ function bwrapArgs(workDir: string, pythonArgs: string[]): string[] {
           "--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
         ]
       : []),
-    "--ro-bind-try",
-    pythonRoot,
-    pythonRoot,
+    // The interpreter's own stdlib/site-packages, wherever they actually live
+    // (venv, pyenv, conda, a CI runner's hosted Python — see pythonLibDirs).
+    ...pythonLibDirs().flatMap((dir) => ["--ro-bind-try", dir, dir]),
     "--bind",
     MPL_CACHE,
     MPL_CACHE,

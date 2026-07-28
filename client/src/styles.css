@@ -455,6 +455,20 @@ body {
   border-right: 2px solid var(--accent);
   font-weight: 500;
 }
+/* Drag and drop: the row being dragged fades, the folder (or the whole tree,
+   for a drop at the project root) under the pointer is outlined. */
+.filetree-dragging {
+  opacity: 0.45;
+}
+.filetree-droptarget {
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  border-radius: 4px;
+}
+.filetree-droproot {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
 .filetree-name {
   overflow: hidden;
   text-overflow: ellipsis;
