@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { runPythonIn } from "../src/python.js";
 import {
+  BOOTSTRAP_FILE,
   bootstrapSource,
   buildPythonSpawn,
   PYTHON_BIN,
@@ -12,8 +13,10 @@ import {
   resolvePythonBin,
   resolveSandbox,
   safeEnv,
+  SCRIPT_FILE,
+  type SandboxKind,
 } from "../src/sandbox.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 // run_python executes code the MODEL wrote, and what the model writes can be
 // steered by anything it read (a web page, an uploaded file). These tests pin
@@ -26,6 +29,10 @@ after(async () => {
 
 const sandbox = await resolveSandbox();
 const confined = sandbox.kind !== "none";
+// Reads are confined by bwrap and Landlock only. The macOS seatbelt profile is
+// `(allow default)` plus write/network denials — it deliberately does NOT
+// restrict reads, because a deny-default profile breaks the Python runtime.
+const confinesReads = sandbox.kind === "bwrap" || sandbox.kind === "landlock";
 
 test("credentials are stripped from the interpreter's environment", () => {
   const env = safeEnv({
@@ -115,10 +122,17 @@ test("the network is unreachable", async () => {
 test("raw sockets are unreachable too, not just the patched module", { skip: !confined }, async () => {
   const res = await runPythonIn(
     dir,
-    'import _socket\ns = _socket.socket()\ns.settimeout(4)\ns.connect(("1.1.1.1", 80))\nprint("CONNECTED")',
+    [
+      // TCP, and UDP — which Landlock has no access bit for at any ABI, so it
+      // is the seccomp filter that has to stop this one.
+      "import _socket",
+      's = _socket.socket()\ns.settimeout(4)\ntry:\n    s.connect(("1.1.1.1", 80))\n    print("CONNECTED")\nexcept OSError as e:\n    print("tcp blocked:", e)',
+      'u = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)\nprint("SENT", u.sendto(b"x", ("1.1.1.1", 53)))',
+    ].join("\n"),
   );
   assert.equal(res.ok, false, res.output);
   assert.doesNotMatch(res.output, /CONNECTED/);
+  assert.doesNotMatch(res.output, /SENT/);
 });
 
 test("files outside the build directory cannot be written", { skip: !confined }, async () => {
@@ -129,7 +143,7 @@ test("files outside the build directory cannot be written", { skip: !confined },
   assert.match(res.output, /Permission denied|Read-only file system|No such file/);
 });
 
-test("files outside the build directory cannot be read", { skip: !confined }, async () => {
+test("files outside the build directory cannot be read", { skip: !confinesReads }, async () => {
   const secret = path.join(os.homedir(), ".latentdraft-sandbox-secret");
   await writeFile(secret, "top secret\n", "utf8");
   try {
@@ -203,4 +217,97 @@ test("bwrap binds the interpreter's libraries, not a guess from its path", () =>
   }
   // And it execs the resolved absolute interpreter, not a bare name.
   assert.ok(spec.args.includes(PYTHON_BIN));
+});
+
+// ---------------------------------------------------------------------------
+// The network block, pinned against the mode that actually needs it.
+//
+// Every test above goes through resolveSandbox(), which picks bwrap on a
+// typical Linux box — and bwrap's --unshare-net hides everything the Landlock
+// path gets wrong. So drive the landlock bootstrap explicitly: that is the
+// mode where a hole is reachable, and where a regression would go unnoticed.
+
+/** Run `code` under a specific sandbox kind, bypassing the probe's choice. */
+async function runUnderKind(kind: SandboxKind, code: string): Promise<string> {
+  const box = await mkdtemp(path.join(os.tmpdir(), "ld-kind-"));
+  try {
+    await writeFile(path.join(box, SCRIPT_FILE), code, "utf8");
+    await writeFile(path.join(box, BOOTSTRAP_FILE), bootstrapSource(kind, box), "utf8");
+    const spec = buildPythonSpawn(kind, box, [BOOTSTRAP_FILE]);
+    return await new Promise((resolve) => {
+      const child = spawn(spec.file, spec.args, { cwd: spec.cwd, env: spec.env });
+      let out = "";
+      child.stdout.on("data", (d) => (out += d));
+      child.stderr.on("data", (d) => (out += d));
+      child.on("error", (e) => resolve(`spawn failed: ${e}`));
+      child.on("close", () => resolve(out));
+    });
+  } finally {
+    await rm(box, { recursive: true, force: true });
+  }
+}
+
+// Landlock is Linux-only and needs ≥5.13; skip where it cannot apply at all.
+const landlockUsable =
+  process.platform === "linux" &&
+  !/refusing to run/.test(await runUnderKind("landlock", 'print("ok")'));
+
+test(
+  "the seccomp filter closes the network in landlock mode, UDP included",
+  { skip: !landlockUsable },
+  async () => {
+    const out = await runUnderKind(
+      "landlock",
+      [
+        "import _socket, socket",
+        "def t(label, fn):",
+        "    try: print(label, 'OPEN', fn())",
+        "    except OSError as e: print(label, 'blocked')",
+        // UDP: no Landlock access bit exists for it at any ABI.
+        "t('udp', lambda: _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM).sendto(b'x', ('1.1.1.1', 53)))",
+        // TCP: Landlock only denies this from ABI 4 (kernel 6.7) up.
+        "t('tcp', lambda: _socket.socket().connect(('1.1.1.1', 80)))",
+        "t('v6', lambda: _socket.socket(_socket.AF_INET6, _socket.SOCK_STREAM))",
+        // The escape no Python-level patch can close: socket.socket is a
+        // subclass, so its base is the untouched C constructor.
+        "t('base', lambda: socket.socket.__bases__[0](_socket.AF_INET, _socket.SOCK_DGRAM))",
+      ].join("\n"),
+    );
+    assert.doesNotMatch(out, /OPEN/, out);
+    for (const probe of ["udp", "tcp", "v6", "base"]) {
+      assert.match(out, new RegExp(`${probe} blocked`), out);
+    }
+  },
+);
+
+test(
+  "…without taking AF_UNIX with it — multiprocessing and joblib need it",
+  { skip: !landlockUsable },
+  async () => {
+    const out = await runUnderKind(
+      "landlock",
+      [
+        "import socket, _socket",
+        "s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)",
+        "a, b = socket.socketpair()",
+        "print('AF_UNIX ok', s.fileno() >= 0, a.fileno() >= 0, b.fileno() >= 0)",
+      ].join("\n"),
+    );
+    assert.match(out, /AF_UNIX ok True True True/, out);
+  },
+);
+
+test("the seccomp filter is emitted for the modes that run the interpreter directly", () => {
+  // bwrap already unshared the network; seatbelt denies it in the profile.
+  for (const kind of ["landlock", "none"] as SandboxKind[]) {
+    assert.match(bootstrapSource(kind, dir), /_ld_apply_seccomp/, kind);
+    assert.match(bootstrapSource(kind, dir), /SECCOMP_SET_MODE_FILTER|317/, kind);
+  }
+  for (const kind of ["bwrap", "seatbelt"] as SandboxKind[]) {
+    assert.doesNotMatch(bootstrapSource(kind, dir), /_ld_apply_seccomp/, kind);
+  }
+  // Landlock fails closed when the filter will not install; "none" promises no
+  // OS confinement in the first place, so there it is best effort.
+  assert.match(bootstrapSource("landlock", dir), /seccomp network filter — refusing to run/);
+  assert.doesNotMatch(bootstrapSource("none", dir), /seccomp network filter — refusing to run/);
 });

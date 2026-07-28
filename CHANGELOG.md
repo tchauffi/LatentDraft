@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`run_python`'s network block is now enforced by the kernel.** The interpreter-level socket block introduced in 0.3.0 patched `socket.socket`, which is a *subclass* of the C-level `_socket.socket` — so it never reached the base class, and `import _socket` (or `socket.socket.__bases__[0]`) walked straight past it. Landlock could not make up the difference: it has no UDP access right at any ABI, and no network rights at all below kernel 6.7 (Debian 12, Ubuntu 22.04). On a Landlock host the snippet could therefore open a UDP socket and send data off the machine. A **seccomp-BPF filter** now refuses `socket(2)` for `AF_INET` and `AF_INET6` before the snippet runs, closing TCP and UDP together on every kernel and behind every Python-level escape; `AF_UNIX` stays open so `multiprocessing` and `joblib` are unaffected. Landlock mode fails closed if the filter cannot be installed. bubblewrap (`--unshare-net`) and macOS `sandbox-exec` were never affected.
+
 ### Added
 
 - **`fontawesome5` works.** It used to abort the engine outright — `free(): invalid pointer`, no PDF and no LaTeX error to fix — because its XeTeX helper walks every glyph of the OTF via `\XeTeXglyphname` at load time, so the CV template, the autocomplete list and the agent's instructions all steered people to the v4 `fontawesome` package instead. A shim in `server/texmf` (put on the engine's search path with `-Z search-path`) now routes the package through its Type1 path: the same 1377 `\faXxx` commands, plus `\faIcon{name}` and the style option (`\faStar[regular]`), with no change to your source and nothing else in the document perturbed. fontawesome5 is now what the `cv` template loads and what the agent reaches for; `\usepackage{fontawesome}` (v4) keeps working. Font Awesome 5 **Free** only — `[pro]` needs fonts Tectonic's bundle doesn't ship. The flag is probed once against the actual binary, so an older `TECTONIC_BIN` degrades to a startup warning instead of breaking every compile.
